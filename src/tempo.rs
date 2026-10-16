@@ -14,10 +14,11 @@ const MIN_BPM: f64 = 40.0;
 const MAX_BPM: f64 = 220.0;
 /// Peaks of the autocorrelation to try.
 const CANDIDATES: usize = 6;
-/// The octave a tempo is reported in. Below it a tempo is read as half-time
-/// and doubled, so a 125 BPM track tracked on its half-time pulse still says
-/// 125; above it, as eighth notes, and halved, so a rock track whose hi-hats
-/// make the steadiest grid says 112, not 224. Drum & bass stays at 174.
+/// The default octave a tempo is reported in, `[min, max)`. Below it a tempo
+/// is read as half-time and doubled, so a 125 BPM track tracked on its
+/// half-time pulse still says 125; above it, as eighth notes, and halved, so
+/// a rock track whose hi-hats make the steadiest grid says 112, not 224.
+/// Drum & bass stays at 174; frenchcore wants a range of its own.
 pub const DJ_BPM: (f64, f64) = (75.0, 175.0);
 /// Shares of beats on the grid closer than this count as a tie, broken
 /// towards 120 BPM as Stelly's estimate is.
@@ -29,8 +30,10 @@ pub struct Choice {
     pub grid: Option<Grid>,
 }
 
-/// Track with each candidate plus the `hint`, keep the best.
-pub fn choose(onsets: &Onsets, hint: Option<f64>) -> Option<Choice> {
+/// Track with each candidate plus the `hint`, keep the best, and bring it
+/// into `range`, which must span at least an octave.
+pub fn choose(onsets: &Onsets, hint: Option<f64>, range: (f64, f64)) -> Option<Choice> {
+    assert!(range.1 >= 2.0 * range.0, "a tempo range must span an octave: {range:?}");
     let mut tried: Vec<Choice> = candidates(onsets)
         .into_iter()
         .chain(hint)
@@ -47,12 +50,12 @@ pub fn choose(onsets: &Onsets, hint: Option<f64>) -> Option<Choice> {
     let mut choice = tried.into_iter().max_by(|a, b| prior(a).total_cmp(&prior(b)))?;
 
     choice.bpm = choice.grid.as_ref().map_or(choice.bpm, |g| g.bpm);
-    while choice.bpm < DJ_BPM.0 && choice.beats.len() >= 2 {
+    while choice.bpm < range.0 && choice.beats.len() >= 2 {
         choice.beats = double(&choice.beats);
         choice.grid = grid::fit(&choice.beats);
         choice.bpm *= 2.0;
     }
-    while choice.bpm >= DJ_BPM.1 && choice.beats.len() >= 16 {
+    while choice.bpm >= range.1 && choice.beats.len() >= 16 {
         choice.beats = halve(onsets, &choice.beats);
         choice.grid = grid::fit(&choice.beats);
         choice.bpm /= 2.0;
@@ -137,7 +140,7 @@ mod tests {
             t += 60.0 / (bpm * 2.0 / 3.0);
         }
         let onsets = descriptors::onsets(&audio, RATE);
-        let choice = choose(&onsets, Some(bpm * 2.0 / 3.0)).unwrap();
+        let choice = choose(&onsets, Some(bpm * 2.0 / 3.0), DJ_BPM).unwrap();
         assert!((choice.bpm - bpm).abs() < 0.05, "chose {}", choice.bpm);
     }
 
@@ -166,7 +169,7 @@ mod tests {
     #[test]
     fn half_time_is_doubled() {
         let onsets = descriptors::onsets(&clicks(62.5, 0.3, 60.0), RATE);
-        let choice = choose(&onsets, None).unwrap();
+        let choice = choose(&onsets, None, DJ_BPM).unwrap();
         assert!((choice.bpm - 125.0).abs() < 0.05, "chose {}", choice.bpm);
     }
 }

@@ -30,6 +30,9 @@ struct Analyse {
     /// print one JSON object per file, every beat included
     #[argh(switch)]
     json: bool,
+    /// tempos are reported in [MIN, MAX), e.g. 75-175, the default
+    #[argh(option, default = "stelly_mix::tempo::DJ_BPM", from_str_fn(bpm_range))]
+    bpm_range: (f64, f64),
     /// audio files: MP3, FLAC, WAV, AIFF, Ogg, Opus, M4A
     #[argh(positional)]
     files: Vec<PathBuf>,
@@ -42,6 +45,9 @@ struct Eval {
     /// list this many files with the worst beat F-measure
     #[argh(option, default = "0")]
     worst: usize,
+    /// tempos are reported in [MIN, MAX), e.g. 75-175, the default
+    #[argh(option, default = "stelly_mix::tempo::DJ_BPM", from_str_fn(bpm_range))]
+    bpm_range: (f64, f64),
     /// directory of `.beats` annotations, Ballroom's format
     #[argh(positional)]
     annotations: PathBuf,
@@ -56,8 +62,11 @@ fn main() -> Result<()> {
     match cli.command {
         Command::Analyse(args) => {
             let mut failed = 0;
+            let options = stelly_mix::Options {
+                bpm_range: args.bpm_range,
+            };
             for file in &args.files {
-                if let Err(err) = analyse(file, args.json) {
+                if let Err(err) = analyse(file, args.json, &options) {
                     eprintln!("{}: {err:#}", file.display());
                     failed += 1;
                 }
@@ -101,6 +110,9 @@ fn evaluate(args: &Eval) -> Result<()> {
     eprintln!("{} annotated files", pairs.len());
 
     let started = Instant::now();
+    let options = stelly_mix::Options {
+        bpm_range: args.bpm_range,
+    };
     let next = AtomicUsize::new(0);
     let scored = Mutex::new(Vec::new());
     let workers = std::thread::available_parallelism().map_or(4, |n| n.get());
@@ -109,7 +121,7 @@ fn evaluate(args: &Eval) -> Result<()> {
             scope.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 let Some((truth, file)) = pairs.get(i) else { break };
-                match score(truth, file) {
+                match score(truth, file, &options) {
                     Ok(s) => scored.lock().unwrap().push(s),
                     Err(err) => eprintln!("{}: {err:#}", file.display()),
                 }
@@ -151,9 +163,9 @@ fn evaluate(args: &Eval) -> Result<()> {
     Ok(())
 }
 
-fn score(truth: &Path, file: &Path) -> Result<Scored> {
+fn score(truth: &Path, file: &Path, options: &stelly_mix::Options) -> Result<Scored> {
     let truth = Truth::read(truth)?;
-    let analysis = stelly_mix::analyse(&stelly_mix::decode::decode_file(file)?)?;
+    let analysis = stelly_mix::analyse(&stelly_mix::decode::decode_file(file)?, options)?;
     let (acc1, acc2) = match (analysis.grid.as_ref(), truth.bpm()) {
         (Some(grid), Some(annotated)) => eval::tempo_accuracy(grid.bpm, annotated),
         _ => (false, false),
@@ -182,10 +194,10 @@ fn walk(dir: &Path, visit: &mut dyn FnMut(&Path)) -> Result<()> {
     Ok(())
 }
 
-fn analyse(file: &Path, json: bool) -> Result<()> {
+fn analyse(file: &Path, json: bool, options: &stelly_mix::Options) -> Result<()> {
     let started = Instant::now();
     let pcm = stelly_mix::decode::decode_file(file)?;
-    let analysis = stelly_mix::analyse(&pcm)?;
+    let analysis = stelly_mix::analyse(&pcm, options)?;
 
     if json {
         let mut value = serde_json::to_value(&analysis)?;
@@ -226,6 +238,17 @@ fn analyse(file: &Path, json: bool) -> Result<()> {
         started.elapsed().as_secs_f64()
     );
     Ok(())
+}
+
+/// "MIN-MAX", spanning at least an octave so every tempo has a place in it.
+fn bpm_range(text: &str) -> Result<(f64, f64), String> {
+    let (min, max) = text.split_once('-').ok_or("expected MIN-MAX, e.g. 75-175")?;
+    let parse = |v: &str| v.trim().parse::<f64>().map_err(|e| format!("{v:?}: {e}"));
+    let (min, max) = (parse(min)?, parse(max)?);
+    if !(min > 0.0 && max >= 2.0 * min) {
+        return Err(format!("{min}-{max} must span an octave, MAX at least twice MIN"));
+    }
+    Ok((min, max))
 }
 
 fn clock(seconds: f64) -> String {

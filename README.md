@@ -53,9 +53,13 @@ song in the tests, and run on a handful of real tracks.
 - **Downbeats are weak on real music.** Confidence comes out at 0.02–0.11:
   loops look the same from every beat position. Needs better cues (kick vs.
   snare pattern, harmonic change) and an annotated set to measure against.
-- **Tempo range is fixed** at 75–175 BPM. Frenchcore at 200 reads as 100;
-  it should be a setting. Inside the range the octave is still a guess: a
-  hard tech track can track cleanly at 78 and not at 156.
+- **The tempo octave is a guess.** Tempos are reported in 75–175 BPM by
+  default, `--bpm-range 100-220` for frenchcore. Inside the range, grid share
+  favours the faster pulse: with `--bpm-range 60-240` Ballroom's Quickstep
+  goes from 0.63 to 0.81 beat F but Samba and Rumba get doubled, 0.79 overall
+  against 0.77. And a hard tech track can track cleanly at 78 and not at 156.
+- **Beats sit ~6ms late** of Ballroom's annotations (median; quartiles 4 and
+  9ms), well inside the tolerance and under a frame.
 
 ## Evaluation
 

@@ -41,12 +41,26 @@ pub struct Analysis {
     pub sections: Vec<f64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct Options {
+    /// The octave tempos are reported in, `[min, max)`; see `tempo::DJ_BPM`.
+    pub bpm_range: (f64, f64),
+}
+
+impl Default for Options {
+    fn default() -> Self {
+        Self {
+            bpm_range: tempo::DJ_BPM,
+        }
+    }
+}
+
 /// Everything, from a decoded track.
-pub fn analyse(pcm: &Pcm) -> Result<Analysis> {
+pub fn analyse(pcm: &Pcm, options: &Options) -> Result<Analysis> {
     let described = descriptors::extract(&pcm.samples, pcm.rate)?;
     let onsets = descriptors::onsets(&pcm.samples, pcm.rate);
     let tempo::Choice { beats, grid, .. } =
-        tempo::choose(&onsets, described.bpm).context("found no tempo")?;
+        tempo::choose(&onsets, described.bpm, options.bpm_range).context("found no tempo")?;
 
     let features = bands::per_beat(&pcm.samples, pcm.rate, &beats);
     let structure = structure::analyse(&features);
@@ -130,7 +144,7 @@ mod tests {
     #[test]
     fn downbeats_and_phrases_of_a_song() {
         let (samples, first_bar) = song(126.0);
-        let analysis = analyse(&Pcm { samples, rate: RATE }).unwrap();
+        let analysis = analyse(&Pcm { samples, rate: RATE }, &Options::default()).unwrap();
         let bar = 4.0 * 60.0 / 126.0;
 
         let first = analysis.downbeats[0];
