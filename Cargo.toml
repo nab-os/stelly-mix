@@ -15,9 +15,15 @@ stelly-audio = { git = "ssh://git@github.com/nab-os/stelly.git", branch = "share
 
 anyhow = "1"
 argh = "0.1.19"
+# Opus, which symphonia demuxes but cannot decode. Pure Rust, bit-exact on
+# the RFC 8251 vectors. opus-decoder is too, but its transforms are plain
+# O(n²) DFTs: 28s for a five-minute track where this takes well under one.
+rusty-opus = "1.0.1"
 realfft = "3.5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Only for demuxing Ogg Opus; the same symphonia stelly-audio decodes with.
+symphonia = { version = "0.6.1", default-features = false, features = ["ogg"] }
 
 [profile.release]
 lto = true

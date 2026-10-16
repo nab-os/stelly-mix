@@ -204,6 +204,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "rusty-opus"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70e241f0b809c02cf3a868ab7ad0568ac35eadcc6ba3997663eb920d9f425f75"
+
+[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -271,9 +277,11 @@ dependencies = [
  "anyhow",
  "argh",
  "realfft",
+ "rusty-opus",
  "serde",
  "serde_json",
  "stelly-audio",
+ "symphonia",
 ]
 
 [[package]]

@@ -7,6 +7,7 @@
 
 pub mod bands;
 pub mod beats;
+pub mod decode;
 pub mod grid;
 pub mod key;
 pub mod structure;

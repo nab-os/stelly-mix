@@ -1,13 +1,13 @@
 //! A grid fitted per 20s window, seeded at a given tempo: does it change?
 
-use stelly_audio::{decode, descriptors};
+use stelly_audio::descriptors;
 use stelly_mix::{beats, grid};
 
 fn main() -> anyhow::Result<()> {
     let mut args = std::env::args().skip(1);
     let path = args.next().expect("a file");
     let bpm: f64 = args.next().expect("a tempo").parse()?;
-    let pcm = decode::decode_file(path.as_ref())?;
+    let pcm = stelly_mix::decode::decode_file(path.as_ref())?;
     let tracked = beats::track(&descriptors::onsets(&pcm.samples, pcm.rate), bpm);
     let mut start = 0.0;
     while start < pcm.seconds() {

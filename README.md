@@ -23,7 +23,9 @@ Library/ALT BLK ERA/Misfits _ SOLAR/02 - I'm Normally Like This.flac
 
 Decoding and the descriptors (tempo estimate, key, loudness) come from
 `stelly-audio`, the analysis crate shared with Stelly. Everything from beats
-onwards is here.
+onwards is here, and so is Opus: symphonia demuxes it, `rusty-opus` decodes
+it, pure Rust and sample-for-sample with libopus, pre-skip dropped so beats
+are not 6.5ms late.
 
 - **Tempo**: the onset envelope's strongest autocorrelation peaks are each
   tracked, and the one whose beats sit best on a steady grid wins. The
@@ -52,9 +54,8 @@ handful of real tracks. Not yet measured against ground truth.
   loops look the same from every beat position. Needs better cues (kick vs.
   snare pattern, harmonic change) and an annotated set to measure against.
 - **Tempo range is fixed** at 75–175 BPM. Frenchcore at 200 reads as 100;
-  it should be a setting.
-- **No Opus.** symphonia has no Opus decoder, and Opus was a fifth of the
-  library this was first tried on.
+  it should be a setting. Inside the range the octave is still a guess: a
+  hard tech track can track cleanly at 78 and not at 156.
 
 ## Diagnostics
 
@@ -66,12 +67,11 @@ fits a grid per 20s window, to see where a track drifts.
 
 1. Ground truth: beat and downbeat annotations (GTZAN/Ballroom/Harmonix
    sets, or a Mixxx/Rekordbox library's grids) and an `eval` command.
-2. Opus, through libopus or an ffmpeg fallback.
-3. Segments: CLAP embeddings per phrase, so passages can be compared, not
+2. Segments: CLAP embeddings per phrase, so passages can be compared, not
    just tracks.
-4. Transitions: from track A's phrase to track B's, scored on segment
+3. Transitions: from track A's phrase to track B's, scored on segment
    distance, tempo ratio, Camelot distance and energy.
-5. Two-deck playback with beat-synced crossfades.
+4. Two-deck playback with beat-synced crossfades.
 
 ## Building
 

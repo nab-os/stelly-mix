@@ -1,12 +1,12 @@
 //! Tempo candidates of a file, and how well the beat tracker and grid do
 //! seeded with each, plus any tempos given after the file. A diagnostic.
 
-use stelly_audio::{decode, descriptors};
+use stelly_audio::descriptors;
 use stelly_mix::{beats, grid, tempo};
 
 fn main() -> anyhow::Result<()> {
     let path = std::env::args().nth(1).expect("a file");
-    let pcm = decode::decode_file(path.as_ref())?;
+    let pcm = stelly_mix::decode::decode_file(path.as_ref())?;
     let onsets = descriptors::onsets(&pcm.samples, pcm.rate);
     let peaks: Vec<f64> = tempo::candidates(&onsets);
     println!("described bpm {:?}", descriptors::extract(&pcm.samples, pcm.rate)?.bpm);

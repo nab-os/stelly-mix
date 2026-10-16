@@ -25,7 +25,7 @@ struct Analyse {
     /// print one JSON object per file, every beat included
     #[argh(switch)]
     json: bool,
-    /// audio files: MP3, FLAC, WAV, AIFF, Ogg, M4A
+    /// audio files: MP3, FLAC, WAV, AIFF, Ogg, Opus, M4A
     #[argh(positional)]
     files: Vec<PathBuf>,
 }
@@ -51,7 +51,7 @@ fn main() -> Result<()> {
 
 fn analyse(file: &Path, json: bool) -> Result<()> {
     let started = Instant::now();
-    let pcm = stelly_audio::decode::decode_file(file)?;
+    let pcm = stelly_mix::decode::decode_file(file)?;
     let analysis = stelly_mix::analyse(&pcm)?;
 
     if json {
