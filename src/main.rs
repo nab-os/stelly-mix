@@ -24,7 +24,29 @@ enum Command {
     Analyse(Analyse),
     Index(Index),
     Next(Next),
+    Mix(Mix),
     Eval(Eval),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "mix")]
+/// Render the best transition from one track into another to a WAV file.
+struct Mix {
+    /// where to write it
+    #[argh(option, default = "PathBuf::from(\"transition.wav\")")]
+    out: PathBuf,
+    /// seconds of each track around the crossfade
+    #[argh(option, default = "30.0")]
+    lead: f64,
+    /// largest tempo change, in percent
+    #[argh(option, default = "6.0")]
+    stretch: f64,
+    /// the track playing
+    #[argh(positional)]
+    from: PathBuf,
+    /// the track to mix into
+    #[argh(positional)]
+    to: PathBuf,
 }
 
 #[derive(FromArgs)]
@@ -108,6 +130,7 @@ fn main() -> Result<()> {
         }
         Command::Index(args) => index(&args)?,
         Command::Next(args) => next(&args)?,
+        Command::Mix(args) => mix(&args)?,
         Command::Eval(args) => evaluate(&args)?,
     }
     Ok(())
@@ -178,19 +201,58 @@ fn index(args: &Index) -> Result<()> {
     Ok(())
 }
 
+/// The library's entry for a file, indexing it first if need be.
+fn indexed(library: &Library, file: &Path) -> Result<stelly_mix::library::Track> {
+    if let Some(track) = library.get(file) {
+        return Ok(track);
+    }
+    let models = stelly_mix::models::dir();
+    stelly_mix::models::ensure(&models)?;
+    let mut encoder = AudioEncoder::load(&models, 4)?;
+    let track = stelly_mix::library::index(file, &stelly_mix::Options::default(), &mut encoder)?;
+    library.put(&track)?;
+    Ok(track)
+}
+
+fn mix(args: &Mix) -> Result<()> {
+    let library = Library::open(Library::default_dir())?;
+    let (playing, next) = (indexed(&library, &args.from)?, indexed(&library, &args.to)?);
+    let options = stelly_mix::transitions::Options {
+        max_stretch: args.stretch / 100.0,
+    };
+    let transition = stelly_mix::transitions::from(&playing, std::slice::from_ref(&next), &options)
+        .into_iter()
+        .next()
+        .with_context(|| {
+            format!(
+                "{:.2} and {:.2} BPM are more than {}% apart",
+                playing.bpm().unwrap_or(0.0),
+                next.bpm().unwrap_or(0.0),
+                args.stretch
+            )
+        })?;
+    let a = stelly_mix::decode::decode_file(&playing.path)?;
+    let b = stelly_mix::decode::decode_file(&next.path)?;
+    let rendered = stelly_mix::render::render(&playing, &a, &next, &b, &transition, args.lead)?;
+    stelly_mix::render::write_wav(&args.out, &rendered.pcm)?;
+    let (out, into) = (&playing.segments[transition.out], &next.segments[transition.into]);
+    println!(
+        "{}: {} at {} → {} at {}, {:+.1}% tempo, crossfade {} to {}",
+        args.out.display(),
+        playing.name(),
+        clock(out.start),
+        next.name(),
+        clock(into.start),
+        (transition.ratio - 1.0) * 100.0,
+        clock(rendered.fade.0),
+        clock(rendered.fade.1)
+    );
+    Ok(())
+}
+
 fn next(args: &Next) -> Result<()> {
     let library = Library::open(Library::default_dir())?;
-    let playing = match library.get(&args.file) {
-        Some(track) => track,
-        None => {
-            let models = stelly_mix::models::dir();
-            stelly_mix::models::ensure(&models)?;
-            let mut encoder = AudioEncoder::load(&models, 4)?;
-            let track = stelly_mix::library::index(&args.file, &stelly_mix::Options::default(), &mut encoder)?;
-            library.put(&track)?;
-            track
-        }
-    };
+    let playing = indexed(&library, &args.file)?;
     let others = library.all()?;
     let options = stelly_mix::transitions::Options {
         max_stretch: args.stretch / 100.0,

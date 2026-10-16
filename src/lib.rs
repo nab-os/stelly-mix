@@ -13,6 +13,7 @@ pub mod grid;
 pub mod key;
 pub mod library;
 pub mod models;
+pub mod render;
 pub mod segments;
 pub mod structure;
 pub mod tempo;

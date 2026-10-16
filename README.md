@@ -19,6 +19,37 @@ Library/ALT BLK ERA/Misfits _ SOLAR/02 - I'm Normally Like This.flac
   2:54.1 long, analysed in 0.4s
 ```
 
+## Mixing
+
+```sh
+cargo run --release -- index ~/Music/Hard\ Tech            # analyse and embed every phrase
+cargo run --release -- next some/track.opus                # where to go from here
+cargo run --release -- mix --out t.wav playing.opus next.opus   # hear the best way there
+```
+
+`index` cuts every track at its eight-bar phrases and embeds each with
+CLAP's audio tower, the same model and weights as Stelly, fetched once
+(117MB, hash-checked) into `~/.local/share/stelly-mix/models`. The library is
+one JSON file a track in `~/.local/share/stelly-mix/library`, redone when the
+file changes. 159 tracks take about two minutes.
+
+`next` ranks the library from the playing track: the best pair of a phrase
+in its second half and one in the other track's first, scored on how alike
+the two phrases sound (against the other candidates: within a genre every
+pair is 0.93–0.96 raw), the tempo change, Camelot steps and the loudness
+step. Tracks more than ±6% away are left out.
+
+```
+0.72  Remon Verhoeve - High on C
+      out at 4:12.0 → in at 0:36.7, -1.9% tempo, 3B → 3B, sound 0.98, -0.5 LU
+```
+
+`mix` renders that transition: the incoming phrase starts on the outgoing
+one's first beat and the crossfade runs over those eight bars, the incoming
+track resampled onto the playing one's tempo, pitch moving with it as on a
+turntable, level matched. Mono. Analysed again, a render is one grid from
+end to end: 99–100% of its beats on it, before, during and after the fade.
+
 ## How it works
 
 Decoding and the descriptors (tempo estimate, key, loudness) come from
@@ -119,11 +150,10 @@ fits a grid per 20s window, to see where a track drifts.
 1. Better than the baseline above: beat phase on syncopated music, metres
    other than 4/4, downbeats. And a set nearer what DJs play: Ballroom is
    no hard tech.
-2. Segments: CLAP embeddings per phrase, so passages can be compared, not
-   just tracks.
-3. Transitions: from track A's phrase to track B's, scored on segment
-   distance, tempo ratio, Camelot distance and energy.
-4. Two-deck playback with beat-synced crossfades.
+2. Transitions tuned by ear: the weights are a first guess.
+3. Better renders: stereo, time-stretching that keeps the pitch, a bass swap
+   instead of a plain crossfade.
+4. Two-deck playback, live.
 
 ## Building
 
