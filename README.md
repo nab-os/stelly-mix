@@ -92,6 +92,22 @@ range, and the waltzes are in 3/4, which neither the halving nor the
 four-beat bars know about. The worst files have the right tempo and the
 wrong phase, on the off-beat of syncopated Latin rhythms.
 
+### Against another tracker
+
+Ballroom is no hard tech, and no one has annotated a hard tech set. So
+`tools/reference.py` runs beat_this (CPJKU, ISMIR 2024, the state of the
+art) over a folder and writes its beats in the same `.beats` format:
+
+```sh
+uv run tools/reference.py ~/Music/Hard\ Tech data/reference/hardtech
+cargo run --release -- eval --worst 20 data/reference/hardtech ~/Music/Hard\ Tech
+```
+
+That is agreement, not accuracy: where the two disagree is where to listen.
+beat_this was trained on Ballroom, so it is no referee there, and without
+its DBN its beats sit on a 20ms grid, too coarse to judge a grid's phase.
+CPU only, about 9s for a five-minute track.
+
 ## Diagnostics
 
 `cargo run --release --example tempi <file> [bpm...]` shows each tempo
