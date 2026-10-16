@@ -61,6 +61,12 @@ pub fn track(onsets: &Onsets, bpm: f64) -> Vec<f64> {
         .collect()
 }
 
+/// The onset envelope where a beat at `seconds` registers.
+pub fn strength(onsets: &Onsets, seconds: f64) -> f64 {
+    let frame = (seconds * onsets.fps - ONSET_LAG_FRAMES).round().max(0.0) as usize;
+    onsets.envelope.get(frame).copied().unwrap_or(0.0)
+}
+
 /// The envelope over its standard deviation, smoothed with a Gaussian a
 /// thirty-second of a period wide, so a beat need not land on the exact frame.
 fn local_score(envelope: &[f64], period: f64) -> Vec<f64> {

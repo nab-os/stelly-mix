@@ -25,8 +25,14 @@ Decoding and the descriptors (tempo estimate, key, loudness) come from
 `stelly-audio`, the analysis crate shared with Stelly. Everything from beats
 onwards is here.
 
-- **Beats**: Ellis's dynamic programme over Stelly's onset envelope, seeded
-  with its tempo estimate. Frame-accurate, about ±5ms.
+- **Tempo**: the onset envelope's strongest autocorrelation peaks are each
+  tracked, and the one whose beats sit best on a steady grid wins. The
+  tallest peak alone picks a triplet pulse on some music (83 for a 125 BPM
+  track). The winner is then brought into 75–175 BPM by doubling, or by
+  halving the grid onto its stronger beats: tracking a rock song directly at
+  112 latches onto the backbeat, while its hi-hats give a clean 224 grid.
+- **Beats**: Ellis's dynamic programme over Stelly's onset envelope.
+  Frame-accurate, about ±5ms.
 - **Grid**: a line fitted through the beats. On produced music it lands on
   round tempos (148.00, 174.00) and a phase within a couple of milliseconds,
   which is what syncing two decks needs. A track is *steady* when 80% of its
@@ -45,8 +51,8 @@ handful of real tracks. Not yet measured against ground truth.
 - **Downbeats are weak on real music.** Confidence comes out at 0.02–0.11:
   loops look the same from every beat position. Needs better cues (kick vs.
   snare pattern, harmonic change) and an annotated set to measure against.
-- **Tempo octave.** The estimate is weighted towards 120 BPM, so 87/174 can
-  come out either way. DJs will want a preferred range.
+- **Tempo range is fixed** at 75–175 BPM. Frenchcore at 200 reads as 100;
+  it should be a setting.
 - **No Opus.** symphonia has no Opus decoder, and Opus was a fifth of the
   library this was first tried on.
 
@@ -55,6 +61,10 @@ handful of real tracks. Not yet measured against ground truth.
 1. Ground truth: beat and downbeat annotations (GTZAN/Ballroom/Harmonix
    sets, or a Mixxx/Rekordbox library's grids) and an `eval` command.
 2. Opus, through libopus or an ffmpeg fallback.
+
+`cargo run --release --example tempi <file> [bpm...]` shows each tempo
+candidate and how the tracker does with it; `--example sections <file> <bpm>`
+fits a grid per 20s window, to see where a track drifts.
 3. Segments: CLAP embeddings per phrase, so passages can be compared, not
    just tracks.
 4. Transitions: from track A's phrase to track B's, scored on segment

@@ -10,6 +10,7 @@ pub mod beats;
 pub mod grid;
 pub mod key;
 pub mod structure;
+pub mod tempo;
 
 use anyhow::{Context, Result};
 use serde::Serialize;
@@ -41,9 +42,10 @@ pub struct Analysis {
 /// Everything, from a decoded track.
 pub fn analyse(pcm: &Pcm) -> Result<Analysis> {
     let described = descriptors::extract(&pcm.samples, pcm.rate)?;
-    let bpm = described.bpm.context("found no tempo")?;
+    let onsets = descriptors::onsets(&pcm.samples, pcm.rate);
+    let tempo::Choice { beats, grid, .. } =
+        tempo::choose(&onsets, described.bpm).context("found no tempo")?;
 
-    let beats = beats::track(&descriptors::onsets(&pcm.samples, pcm.rate), bpm);
     let features = bands::per_beat(&pcm.samples, pcm.rate, &beats);
     let structure = structure::analyse(&features);
 
@@ -72,7 +74,7 @@ pub fn analyse(pcm: &Pcm) -> Result<Analysis> {
 
     Ok(Analysis {
         seconds: pcm.seconds(),
-        grid: grid::fit(&beats),
+        grid,
         key,
         loudness: described.loudness_integrated,
         beats,
