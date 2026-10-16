@@ -56,15 +56,17 @@ handful of real tracks. Not yet measured against ground truth.
 - **No Opus.** symphonia has no Opus decoder, and Opus was a fifth of the
   library this was first tried on.
 
+## Diagnostics
+
+`cargo run --release --example tempi <file> [bpm...]` shows each tempo
+candidate and how the tracker does with it; `--example sections <file> <bpm>`
+fits a grid per 20s window, to see where a track drifts.
+
 ## Next
 
 1. Ground truth: beat and downbeat annotations (GTZAN/Ballroom/Harmonix
    sets, or a Mixxx/Rekordbox library's grids) and an `eval` command.
 2. Opus, through libopus or an ffmpeg fallback.
-
-`cargo run --release --example tempi <file> [bpm...]` shows each tempo
-candidate and how the tracker does with it; `--example sections <file> <bpm>`
-fits a grid per 20s window, to see where a track drifts.
 3. Segments: CLAP embeddings per phrase, so passages can be compared, not
    just tracks.
 4. Transitions: from track A's phrase to track B's, scored on segment
