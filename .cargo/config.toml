@@ -1,0 +1,4 @@
+# stelly-audio comes from the private stelly repository, over SSH. Cargo's own
+# git client does not use the SSH agent, the git CLI does.
+[net]
+git-fetch-with-cli = true

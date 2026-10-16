@@ -1,0 +1,27 @@
+[package]
+name = "stelly-mix"
+version = "0.1.0"
+edition = "2021"
+description = "Beat grids, phrases and transitions for people who mix"
+
+[[bin]]
+name = "stelly-mix"
+path = "src/main.rs"
+
+[dependencies]
+# Decoding and the descriptors, shared with Stelly. CLAP is off until the
+# segment embeddings need it; every codec is on, for local files.
+stelly-audio = { git = "ssh://git@github.com/nab-os/stelly.git", branch = "shared-audio-crate", default-features = false, features = ["all-codecs"] }
+
+anyhow = "1"
+argh = "0.1.19"
+realfft = "3.5.0"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+lto = true
+
+# The analysis is tight loops over minutes of audio, ~7x slower unoptimised.
+[profile.dev]
+opt-level = 3
