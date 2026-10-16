@@ -30,6 +30,15 @@ pub fn decode_file(path: &Path) -> Result<Pcm> {
 }
 
 fn decode_opus(path: &Path) -> Result<Pcm> {
+    Ok(Pcm {
+        samples: opus_samples(path, 1)?,
+        rate: OPUS_RATE,
+    })
+}
+
+/// Interleaved samples at 48kHz in `channels`, 1 or 2; the decoder mixes
+/// down or up itself, a plain mean for mono.
+fn opus_samples(path: &Path, channels: usize) -> Result<Vec<f32>> {
     use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
     use symphonia::core::errors::Error;
     use symphonia::core::formats::probe::Hint;
@@ -57,10 +66,9 @@ fn decode_opus(path: &Path) -> Result<Pcm> {
     let track_id = track.id;
     let mut pre_skip = track.delay.unwrap_or(0) as usize;
 
-    // Mono straight from the decoder, whose downmix is the plain mean of the
-    // channels, as every other format gets.
-    let mut decoder = rusty_opus::OpusDecoder::new(OPUS_RATE as i32, 1).map_err(|e| anyhow::anyhow!("{e:?}"))?;
-    let mut frame = vec![0f32; MAX_PACKET];
+    let mut decoder =
+        rusty_opus::OpusDecoder::new(OPUS_RATE as i32, channels).map_err(|e| anyhow::anyhow!("{e:?}"))?;
+    let mut frame = vec![0f32; MAX_PACKET * channels];
     let mut samples = Vec::new();
     loop {
         let packet = match format.next_packet() {
@@ -82,16 +90,109 @@ fn decode_opus(path: &Path) -> Result<Pcm> {
         // The pre-skip can outlast the first packet.
         let skip = pre_skip.min(end - trim);
         pre_skip -= skip;
-        samples.extend_from_slice(&frame[trim + skip..end]);
+        samples.extend_from_slice(&frame[(trim + skip) * channels..end * channels]);
     }
 
     if samples.is_empty() {
         bail!("decoded no audio from {}", path.display());
     }
-    Ok(Pcm {
-        samples,
-        rate: OPUS_RATE,
+    Ok(samples)
+}
+
+/// Two channels, for listening; the analysis only ever needs one.
+#[derive(Debug, Clone)]
+pub struct Stereo {
+    pub left: Vec<f32>,
+    pub right: Vec<f32>,
+    pub rate: u32,
+}
+
+impl Stereo {
+    pub fn len(&self) -> usize {
+        self.left.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.left.is_empty()
+    }
+
+    fn from_interleaved(samples: &[f32], channels: usize, rate: u32) -> Self {
+        let channels = channels.max(1);
+        let frames = samples.chunks_exact(channels);
+        let left = frames.clone().map(|f| f[0]).collect();
+        let right = frames.map(|f| f[if channels > 1 { 1 } else { 0 }]).collect();
+        Self { left, right, rate }
+    }
+}
+
+/// A whole file as stereo: mono doubled, more channels than two cut to the
+/// first two.
+pub fn decode_stereo(path: &Path) -> Result<Stereo> {
+    let opus = path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("opus"));
+    if opus {
+        return Ok(Stereo::from_interleaved(&opus_samples(path, 2)?, 2, OPUS_RATE));
+    }
+    decode_stereo_symphonia(path).or_else(|err| {
+        opus_samples(path, 2)
+            .map(|s| Stereo::from_interleaved(&s, 2, OPUS_RATE))
+            .map_err(|_| err)
     })
+}
+
+fn decode_stereo_symphonia(path: &Path) -> Result<Stereo> {
+    use symphonia::core::codecs::audio::AudioDecoderOptions;
+    use symphonia::core::errors::Error;
+    use symphonia::core::formats::probe::Hint;
+    use symphonia::core::formats::{FormatOptions, TrackType};
+    use symphonia::core::io::MediaSourceStream;
+    use symphonia::core::meta::MetadataOptions;
+
+    let file = std::fs::File::open(path).with_context(|| format!("opening {}", path.display()))?;
+    let stream = MediaSourceStream::new(Box::new(file), Default::default());
+    let mut hint = Hint::new();
+    if let Some(extension) = path.extension().and_then(|e| e.to_str()) {
+        hint.with_extension(extension);
+    }
+    let mut format = symphonia::default::get_probe()
+        .probe(&hint, stream, FormatOptions::default(), MetadataOptions::default())
+        .with_context(|| format!("decoding {}", path.display()))?;
+    let track = format.default_track(TrackType::Audio).context("no audio track")?;
+    let track_id = track.id;
+    let params = track.codec_params.as_ref().and_then(|p| p.audio()).context("no audio codec parameters")?;
+    let mut decoder = symphonia::default::get_codecs()
+        .make_audio_decoder(params, &AudioDecoderOptions::default())
+        .context("no decoder for this stream")?;
+
+    let (mut left, mut right, mut interleaved) = (Vec::new(), Vec::new(), Vec::<f32>::new());
+    let mut rate = 0;
+    loop {
+        let packet = match format.next_packet() {
+            Ok(Some(packet)) => packet,
+            Ok(None) => break,
+            Err(Error::IoError(_)) => break,
+            Err(err) => return Err(err).context("demuxing"),
+        };
+        if packet.track_id != track_id {
+            continue;
+        }
+        let buffer = match decoder.decode(&packet) {
+            Ok(buffer) => buffer,
+            Err(Error::DecodeError(_)) | Err(Error::IoError(_)) => continue,
+            Err(err) => return Err(err).context("decoding"),
+        };
+        rate = buffer.spec().rate();
+        let channels = buffer.spec().channels().count().max(1);
+        interleaved.resize(buffer.samples_interleaved(), 0.0);
+        buffer.copy_to_slice_interleaved(&mut interleaved);
+        for frame in interleaved.chunks_exact(channels) {
+            left.push(frame[0]);
+            right.push(frame[if channels > 1 { 1 } else { 0 }]);
+        }
+    }
+    if left.is_empty() || rate == 0 {
+        bail!("decoded no audio from {}", path.display());
+    }
+    Ok(Stereo { left, right, rate })
 }
 
 #[cfg(test)]

@@ -44,11 +44,19 @@ step. Tracks more than ±6% away are left out.
       out at 4:12.0 → in at 0:36.7, -1.9% tempo, 3B → 3B, sound 0.98, -0.5 LU
 ```
 
-`mix` renders that transition: the incoming phrase starts on the outgoing
-one's first beat and the crossfade runs over those eight bars, the incoming
-track resampled onto the playing one's tempo, pitch moving with it as on a
-turntable, level matched. Mono. Analysed again, a render is one grid from
-end to end: 99–100% of its beats on it, before, during and after the fade.
+`mix` renders that transition, in stereo, in about seven seconds. The
+incoming phrase starts on the outgoing one's first beat and the transition
+runs over those eight bars as a bass swap: the incoming track's mids and
+highs fade in over the first half with its bass held back, the basses trade
+places on the downbeat in the middle (a Linkwitz-Riley split at 150Hz), and
+the outgoing track's mids and highs fade out over the second half. The
+incoming track is resampled onto the playing one's tempo, which keeps the
+beats together, then keylocked back to its own pitch by Signalsmith Stretch.
+`--turntable` lets the pitch move instead, `--crossfade` makes it a plain
+equal-power fade. Analysed again, a render is one grid from end to end:
+99–100% of its beats on it, before, during and after the transition.
+
+Building it wants a C++ compiler and libclang, for Signalsmith Stretch.
 
 ## How it works
 
@@ -151,9 +159,7 @@ fits a grid per 20s window, to see where a track drifts.
    other than 4/4, downbeats. And a set nearer what DJs play: Ballroom is
    no hard tech.
 2. Transitions tuned by ear: the weights are a first guess.
-3. Better renders: stereo, time-stretching that keeps the pitch, a bass swap
-   instead of a plain crossfade.
-4. Two-deck playback, live.
+3. Two-deck playback, live.
 
 ## Building
 

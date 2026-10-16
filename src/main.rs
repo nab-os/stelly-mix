@@ -41,6 +41,12 @@ struct Mix {
     /// largest tempo change, in percent
     #[argh(option, default = "6.0")]
     stretch: f64,
+    /// let the pitch follow the tempo, as on a turntable, instead of keylock
+    #[argh(switch)]
+    turntable: bool,
+    /// a plain equal-power crossfade instead of a bass swap
+    #[argh(switch)]
+    crossfade: bool,
     /// the track playing
     #[argh(positional)]
     from: PathBuf,
@@ -231,13 +237,18 @@ fn mix(args: &Mix) -> Result<()> {
                 args.stretch
             )
         })?;
-    let a = stelly_mix::decode::decode_file(&playing.path)?;
-    let b = stelly_mix::decode::decode_file(&next.path)?;
-    let rendered = stelly_mix::render::render(&playing, &a, &next, &b, &transition, args.lead)?;
-    stelly_mix::render::write_wav(&args.out, &rendered.pcm)?;
+    let a = stelly_mix::decode::decode_stereo(&playing.path)?;
+    let b = stelly_mix::decode::decode_stereo(&next.path)?;
+    let settings = stelly_mix::render::Settings {
+        lead: args.lead,
+        keylock: !args.turntable,
+        bass_swap: !args.crossfade,
+    };
+    let rendered = stelly_mix::render::render(&playing, &a, &next, &b, &transition, &settings)?;
+    stelly_mix::render::write_wav(&args.out, &rendered.audio)?;
     let (out, into) = (&playing.segments[transition.out], &next.segments[transition.into]);
     println!(
-        "{}: {} at {} → {} at {}, {:+.1}% tempo, crossfade {} to {}",
+        "{}: {} at {} → {} at {}, {:+.1}% tempo, transition {} to {}{}",
         args.out.display(),
         playing.name(),
         clock(out.start),
@@ -245,7 +256,8 @@ fn mix(args: &Mix) -> Result<()> {
         clock(into.start),
         (transition.ratio - 1.0) * 100.0,
         clock(rendered.fade.0),
-        clock(rendered.fade.1)
+        clock(rendered.fade.1),
+        rendered.swap.map_or(String::new(), |s| format!(", basses swap at {}", clock(s)))
     );
     Ok(())
 }

@@ -25,8 +25,12 @@ serde_json = "1"
 # Fetching and checking CLAP's weights, once.
 sha2 = "0.10"
 ureq = "3"
-# Only for demuxing Ogg Opus; the same symphonia stelly-audio decodes with.
-symphonia = { version = "0.6.1", default-features = false, features = ["ogg"] }
+# Stereo decoding for renders, and demuxing Ogg Opus; the same symphonia
+# stelly-audio decodes with.
+symphonia = { version = "0.6.1", default-features = false, features = ["all-codecs", "all-formats"] }
+# Keylock for renders: Signalsmith Stretch, compiled from C++, which wants a
+# C++ compiler and libclang at build time.
+signalsmith-stretch = "0.1.3"
 
 [profile.release]
 lto = true
