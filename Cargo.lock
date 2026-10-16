@@ -1085,6 +1085,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "argh",
+ "ebur128",
  "realfft",
  "rusty-opus",
  "serde",

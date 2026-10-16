@@ -4,15 +4,16 @@
 //! bars, and the transition runs over them. The incoming track is resampled
 //! onto the playing one's tempo, which is what keeps the beats together, then
 //! with keylock its pitch is put back where it was by Signalsmith Stretch;
-//! without, it moves as on a turntable, at most a semitone at ±6%. Its level
-//! is matched to the playing track's loudness.
+//! without, it moves as on a turntable, at most a semitone at ±6%. The
+//! louder of the two is turned down to the other's loudness.
 //!
-//! The transition is a bass swap, as a DJ does it on a mixer's EQ: the
-//! incoming track's mids and highs fade in over the first half of the phrase
-//! with its bass held back, the basses trade places on the downbeat at the
-//! middle, and the outgoing track's mids and highs fade out over the second
-//! half. Two kicks and two basslines never play over each other. Or, with
-//! `bass_swap` off, a plain equal-power crossfade.
+//! The transition is a bass swap, as a DJ does it on a mixer's EQ: the two
+//! tracks' mids and highs cross over the phrase, equal-power, while the
+//! incoming bass is held back until the downbeat in the middle, where the
+//! basses trade places. Two kicks and two basslines never play over each
+//! other. Or, with `bass_swap` off, a plain equal-power crossfade. The whole
+//! render sits 3 dB under the quieter track, so the transition, where both
+//! play, has room, and a limiter catches what peaks remain.
 
 use crate::decode::Stereo;
 use crate::library::Track;
@@ -28,6 +29,16 @@ const CROSSOVER_HZ: f64 = 150.0;
 /// How long the basses take to trade places: short enough to land on the
 /// beat, long enough not to click.
 const SWAP_SECONDS: f64 = 0.03;
+/// How far under the quieter track the render is set. Masters peak at full
+/// scale, and two of them beat-matched, at the middle of an equal-power
+/// blend, reach 1.4: 3 dB is room enough that the limiter only touches the
+/// odd peak, rather than pulling every kick of the transition down and
+/// leaving it 2 LU under the tracks either side.
+const HEADROOM_DB: f64 = 3.0;
+/// Peak level the limiter holds the render to: -1 dBFS.
+const CEILING: f32 = 0.891;
+const LOOKAHEAD: f64 = 0.005;
+const RELEASE: f64 = 0.1;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -82,28 +93,36 @@ pub fn render(
         .unwrap_or(middle);
     let swap = sample(swap_at);
 
+    // Both brought to the quieter one's loudness, less the headroom: turning
+    // the hotter track down, as a DJ does with the trim. Boosting the quieter one instead
+    // would drive a master already peaking at full scale into the limiter on
+    // every kick, which takes it back down, and unevenly.
+    let (a_gain, b_gain) = match (body_loudness(a, playing), body_loudness(b, next)) {
+        (Some(a), Some(b)) => {
+            let target = a.min(b) - HEADROOM_DB;
+            (db(target - a), db(target - b))
+        }
+        _ => (1.0, 1.0),
+    };
+
     // The incoming track from its phrase on, on the playing track's tempo:
     // one second of it lasts `ratio` seconds here.
     let ratio = transition.ratio;
     let needed = (end - fade_from) as usize;
     let b = stretch(b, rate, ratio, settings.keylock, into.start, needed);
-    let gain = match (playing.analysis.loudness, next.analysis.loudness) {
-        (Some(a), Some(b)) => 10f64.powf((a - b) / 20.0) as f32,
-        _ => 1.0,
-    };
 
     let length = (end - start) as usize;
     let mut channels = Vec::with_capacity(2);
     for (a_channel, b_channel) in [(&a.left, &b.0), (&a.right, &b.1)] {
         let a_part: Vec<f32> = (start..end)
-            .map(|t| usize::try_from(t).ok().and_then(|i| a_channel.get(i)).copied().unwrap_or(0.0))
+            .map(|t| usize::try_from(t).ok().and_then(|i| a_channel.get(i)).map_or(0.0, |v| v * a_gain))
             .collect();
         let b_part: Vec<f32> = (start..end)
             .map(|t| {
                 usize::try_from(t - fade_from)
                     .ok()
                     .and_then(|i| b_channel.get(i))
-                    .map_or(0.0, |v| v * gain)
+                    .map_or(0.0, |v| v * b_gain)
             })
             .collect();
         let (a_low, b_low) = if settings.bass_swap {
@@ -135,13 +154,7 @@ pub fn render(
     let mut left = channels.pop().unwrap_or_default();
     let mut right = right;
 
-    // Leave headroom rather than clip where both are at full level.
-    let peak = left.iter().chain(&right).fold(0f32, |m, v| m.max(v.abs()));
-    if peak > 0.99 {
-        for v in left.iter_mut().chain(right.iter_mut()) {
-            *v *= 0.99 / peak;
-        }
-    }
+    limit(&mut left, &mut right, rate);
     let seconds = |s: isize| (s - start) as f64 / rate as f64;
     Ok(Rendered {
         audio: Stereo { left, right, rate },
@@ -156,9 +169,81 @@ fn swap_gains(t: isize, from: isize, to: isize, swap: isize, rate: u32) -> ((f64
     // The basses trade over `ramp` samples ending on the beat.
     let bass_in = progress(t, swap - ramp, swap);
     let (bass_in, bass_out) = ((bass_in * FRAC_PI_2).sin(), (bass_in * FRAC_PI_2).cos());
-    let rest_in = (progress(t, from, swap) * FRAC_PI_2).sin();
-    let rest_out = (progress(t, swap, to) * FRAC_PI_2).cos();
-    ((bass_out, rest_out), (bass_in, rest_in))
+    // The rest equal-power over the whole phrase: two tracks' mids and highs
+    // add as power, so the level holds through it; crossed linearly, it dips
+    // 2 LU in the middle.
+    let rest = progress(t, from, to) * FRAC_PI_2;
+    ((bass_out, rest.cos()), (bass_in, rest.sin()))
+}
+
+/// Peaks brought down to `CEILING` and nothing else touched: the tracks are
+/// mastered loud, and turning the whole render down to fit the odd peak where
+/// two of them meet would leave it quieter than either. Stereo-linked, so the
+/// image does not lean. The gain is the lowest needed over the next
+/// `LOOKAHEAD`, averaged over the last `LOOKAHEAD`: that reaches the needed
+/// gain by the time the peak does without stepping, then recovers over
+/// `RELEASE`.
+fn limit(left: &mut [f32], right: &mut [f32], rate: u32) {
+    let ahead = ((LOOKAHEAD * rate as f64) as usize).max(1);
+    let recover = 1.0 - (-1.0 / (RELEASE * rate as f64)).exp() as f32;
+    let needed: Vec<f32> = left
+        .iter()
+        .zip(right.iter())
+        .map(|(l, r)| (CEILING / l.abs().max(r.abs()).max(1e-9)).min(1.0))
+        .collect();
+    let n = needed.len();
+
+    // Lowest over [i, i + ahead), by a monotonic queue.
+    let mut held = vec![1f32; n];
+    let mut queue: std::collections::VecDeque<usize> = std::collections::VecDeque::new();
+    for i in (0..n).rev() {
+        while queue.back().is_some_and(|&j| needed[j] >= needed[i]) {
+            queue.pop_back();
+        }
+        queue.push_back(i);
+        while queue.front().is_some_and(|&j| j >= i + ahead) {
+            queue.pop_front();
+        }
+        held[i] = needed[*queue.front().expect("just pushed")];
+    }
+
+    let (mut sum, mut gain) = (0f64, 1f32);
+    for i in 0..n {
+        sum += held[i] as f64;
+        if i >= ahead {
+            sum -= held[i - ahead] as f64;
+        }
+        let smoothed = (sum / (i + 1).min(ahead) as f64) as f32;
+        gain = smoothed.min(gain + (1.0 - gain) * recover);
+        left[i] *= gain;
+        right[i] *= gain;
+    }
+}
+
+/// How loud a track's main sections are, in stereo: the 80th percentile of
+/// its phrases' loudness. Not the whole track's, which its intro and its
+/// breakdowns pull down by however long they last; and not the analysis's
+/// mono figure, which reads a wide master 3–4 dB low, by how wide it is.
+fn body_loudness(audio: &Stereo, track: &Track) -> Option<f64> {
+    let rate = audio.rate as f64;
+    let mut phrases: Vec<f64> = track
+        .segments
+        .iter()
+        .filter_map(|segment| {
+            let from = ((segment.start * rate) as usize).min(audio.len());
+            let to = ((segment.end * rate) as usize).min(audio.len());
+            let mut meter = ebur128::EbuR128::new(2, audio.rate, ebur128::Mode::I).ok()?;
+            meter.add_frames_planar_f32(&[&audio.left[from..to], &audio.right[from..to]]).ok()?;
+            meter.loudness_global().ok().filter(|l| l.is_finite())
+        })
+        .collect();
+    phrases.sort_by(f64::total_cmp);
+    phrases.get((phrases.len() * 4 / 5).min(phrases.len().saturating_sub(1))).copied()
+}
+
+/// A level change in dB as a gain.
+fn db(change: f64) -> f32 {
+    10f64.powf(change / 20.0) as f32
 }
 
 /// How far `t` is from `from` to `to`, 0..1.
@@ -300,14 +385,31 @@ mod tests {
     }
 
     #[test]
-    fn the_basses_trade_on_the_beat() {
+    fn the_basses_trade_on_the_beat_and_the_level_holds() {
         let (from, to, swap) = (0, 8 * RATE as isize, 4 * RATE as isize);
         let ((a_bass, _), (b_bass, _)) = swap_gains(swap - RATE as isize, from, to, swap, RATE);
         assert_eq!((a_bass, b_bass), (1.0, 0.0));
-        let ((a_bass, a_rest), (b_bass, b_rest)) = swap_gains(swap, from, to, swap, RATE);
+        let ((a_bass, _), (b_bass, _)) = swap_gains(swap, from, to, swap, RATE);
         assert!(a_bass.abs() < 1e-9 && (b_bass - 1.0).abs() < 1e-9);
-        assert!((a_rest - 1.0).abs() < 1e-9 && (b_rest - 1.0).abs() < 1e-9);
-        let ((_, a_rest), _) = swap_gains(to, from, to, swap, RATE);
-        assert!(a_rest.abs() < 1e-9);
+        for t in (from..=to).step_by(RATE as usize / 4) {
+            let ((_, a_rest), (_, b_rest)) = swap_gains(t, from, to, swap, RATE);
+            assert!((a_rest * a_rest + b_rest * b_rest - 1.0).abs() < 1e-9, "power at {t}");
+        }
     }
+
+    #[test]
+    fn the_limiter_holds_the_ceiling_and_leaves_the_rest() {
+        let mut left: Vec<f32> = sine(100.0, 2.0).iter().map(|v| v * 1.2).collect();
+        // A quiet second after a loud one.
+        for v in &mut left[RATE as usize..] {
+            *v *= 0.25;
+        }
+        let mut right = left.clone();
+        let quiet = left[RATE as usize * 3 / 2];
+        limit(&mut left, &mut right, RATE);
+        let peak = left.iter().fold(0f32, |m, v| m.max(v.abs()));
+        assert!(peak <= CEILING + 1e-6, "peak {peak}");
+        assert!((left[RATE as usize * 3 / 2] - quiet).abs() < 1e-3, "the quiet part was touched");
+    }
+
 }

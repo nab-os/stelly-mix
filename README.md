@@ -56,6 +56,16 @@ beats together, then keylocked back to its own pitch by Signalsmith Stretch.
 equal-power fade. Analysed again, a render is one grid from end to end:
 99–100% of its beats on it, before, during and after the transition.
 
+Levels are matched the way a DJ trims: each track's main sections, the 80th
+percentile of its phrases' stereo loudness, not its average, which a quiet
+intro drags down, and not the analysis's mono figure, which reads a wide
+master 3–4 dB low. The louder track is turned down to the quieter, and the
+whole render sits 3 dB under that: two beat-matched masters peaking at full
+scale reach 1.4 in the middle of the blend, and without the room the limiter
+pulls every kick of the transition down and leaves it 2 LU under the tracks
+either side. A, the transition and B now measure within about 0.8 LU of each
+other; peaks are held at -1 dBFS.
+
 Building it wants a C++ compiler and libclang, for Signalsmith Stretch.
 
 ## How it works

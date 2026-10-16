@@ -22,6 +22,8 @@ rusty-opus = "1.0.1"
 realfft = "3.5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Loudness for matching levels in renders, stereo, as the ear hears it.
+ebur128 = "0.1.10"
 # Fetching and checking CLAP's weights, once.
 sha2 = "0.10"
 ureq = "3"
