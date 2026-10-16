@@ -40,9 +40,11 @@ are not 6.5ms late.
   every beat near it, so the beats a tracker wandered through a breakdown
   are outliers rather than a miscount. On produced music it lands on
   round tempos (148.00, 174.00) and a phase within a couple of milliseconds,
-  which is what syncing two decks needs. A track is *steady* when 80% of its
-  beats sit within 20ms of the grid; played music drifts, and should be
-  synced from its beats instead.
+  which is what syncing two decks needs. A track is *steady* when the
+  stretches of it that keep a beat of their own agree with the grid: a long
+  breakdown the tracker wanders through has no say, a drifting live take
+  agrees only for a while. A steady track's beats are the grid's lines,
+  breakdowns included; played music keeps its tracked beats.
 - **Downbeats**: per-beat band energies and chroma; the beat position where a
   bar before differs most from a bar after is the downbeat.
 - **Phrases and sections**: the same contrast a level up, eight bars at a time.
@@ -54,9 +56,11 @@ Measured against Ballroom's annotations and against beat_this on 159 hard
 tech tracks and 40 others (below), and on click tracks and a synthetic song
 in the tests.
 
-- **Downbeats are weak on real music.** Confidence comes out at 0.02–0.11:
-  loops look the same from every beat position. Needs better cues (kick vs.
-  snare pattern, harmonic change) and an annotated set to measure against.
+- **Downbeats follow the beats.** Where the beats are right the bar
+  contrast picks the right downbeat on 96% of hard tech (27 of 28 tracks
+  where beat_this's own downbeats are consistent). Kick, kick-minus-snare,
+  harmonic change and their sums did no better in a trial on 384 tracks.
+  On Ballroom's 30s Latin clips it is 60%.
 - **The octave is taste.** 88–176 suits hard tech, techno, house, drum &
   bass and hip hop at 90; frenchcore wants `--bpm-range 100-200`, and slow
   hip hop at 85 comes out at 170. Ballroom's waltzes are doubled by it.
@@ -79,9 +83,9 @@ F-measure at ±70ms for beats and downbeats, Acc1 (tempo within 4%) and Acc2
 
 | against                          | files | beat F | down F | Acc1  | Acc2  |
 |----------------------------------|------:|-------:|-------:|------:|------:|
-| Ballroom, annotated              |   698 |  0.752 |  0.472 | 0.597 | 0.884 |
-| beat_this, hard tech             |   159 |  0.789 |  0.469 | 0.881 | 0.918 |
-| beat_this, 40 FLACs, all genres  |    40 |  0.697 |  0.477 | 0.550 | 0.900 |
+| Ballroom, annotated              |   698 |  0.755 |  0.473 | 0.599 | 0.887 |
+| beat_this, hard tech             |   159 |  0.846 |  0.623 | 0.893 | 0.931 |
+| beat_this, 40 FLACs, all genres  |    40 |  0.704 |  0.504 | 0.575 | 0.950 |
 
 Published trackers reach about 0.9 beat F on Ballroom. Some of the gap is
 the octave policy, not the audio: its Quickstep is ~200 BPM and halved, its

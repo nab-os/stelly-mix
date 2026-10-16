@@ -30,7 +30,8 @@ pub struct Analysis {
     pub key: Option<Key>,
     /// Integrated loudness, LUFS, for gain matching.
     pub loudness: Option<f64>,
-    /// Tracked beats, seconds. These follow a drifting tempo; the grid does not.
+    /// Beats, seconds: the grid's lines on a steady track, the tracked beats,
+    /// which follow a drifting tempo, otherwise.
     pub beats: Vec<f64>,
     /// Every fourth beat from the first downbeat.
     pub downbeats: Vec<f64>,
@@ -61,6 +62,13 @@ pub fn analyse(pcm: &Pcm, options: &Options) -> Result<Analysis> {
     let onsets = descriptors::onsets(&pcm.samples, pcm.rate);
     let tempo::Choice { beats, grid, .. } =
         tempo::choose(&onsets, described.bpm, options.bpm_range).context("found no tempo")?;
+    // A track made on a grid has its beats on it, breakdowns included, where
+    // the tracker wanders; and counting bars on them cannot be thrown by a
+    // beat the tracker dropped.
+    let beats = match (&grid, beats.first(), beats.last()) {
+        (Some(grid), Some(&first), Some(&last)) if grid.steady => grid.lines(first, last),
+        _ => beats,
+    };
 
     let features = bands::per_beat(&pcm.samples, pcm.rate, &beats);
     let structure = structure::analyse(&features);
