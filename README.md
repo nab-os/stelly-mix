@@ -47,8 +47,8 @@ are not 6.5ms late.
 
 ## Where it stands
 
-Measured on click tracks and a synthetic song (see the tests), and run on a
-handful of real tracks. Not yet measured against ground truth.
+Measured against the Ballroom set (below), on click tracks and a synthetic
+song in the tests, and run on a handful of real tracks.
 
 - **Downbeats are weak on real music.** Confidence comes out at 0.02–0.11:
   loops look the same from every beat position. Needs better cues (kick vs.
@@ -56,6 +56,37 @@ handful of real tracks. Not yet measured against ground truth.
 - **Tempo range is fixed** at 75–175 BPM. Frenchcore at 200 reads as 100;
   it should be a setting. Inside the range the octave is still a guess: a
   hard tech track can track cleanly at 78 and not at 156.
+
+## Evaluation
+
+```sh
+git clone https://github.com/CPJKU/BallroomAnnotations data/ballroom/annotations
+curl -L https://mtg.upf.edu/ismir2004/contest/tempoContest/data1.tar.gz | tar xz -C data/ballroom
+cargo run --release -- eval --worst 15 data/ballroom/annotations data/ballroom/BallroomData
+```
+
+F-measure at ±70ms for beats and downbeats, Acc1 (tempo within 4%) and Acc2
+(also forgiving ×2, ×½, ×3, ×⅓). Ballroom, 698 clips of 30s:
+
+|                     | files | beat F | down F | Acc1  | Acc2  |
+|---------------------|------:|-------:|-------:|------:|------:|
+| ChaChaCha           |   111 |  0.840 |  0.359 | 0.910 | 0.910 |
+| Jive                |    60 |  0.771 |  0.260 | 0.517 | 0.967 |
+| Quickstep           |    82 |  0.626 |  0.436 | 0.000 | 0.963 |
+| Rumba-American      |     7 |  0.816 |  0.554 | 1.000 | 1.000 |
+| Rumba-International |    51 |  0.866 |  0.703 | 0.941 | 1.000 |
+| Rumba-Misc          |    40 |  0.791 |  0.630 | 0.850 | 0.975 |
+| Samba               |    86 |  0.882 |  0.575 | 0.930 | 0.942 |
+| Tango               |    86 |  0.886 |  0.626 | 0.942 | 0.942 |
+| VienneseWaltz       |    65 |  0.555 |  0.326 | 0.031 | 0.615 |
+| Waltz               |   110 |  0.722 |  0.306 | 0.591 | 0.818 |
+| **all**             |   698 |  0.773 |  0.450 | 0.643 | 0.898 |
+
+Published trackers reach about 0.9 beat F on this set. Some of the gap is
+deliberate: Quickstep, ~200 BPM, is reported at half tempo by the 75–175
+range, and the waltzes are in 3/4, which neither the halving nor the
+four-beat bars know about. The worst files have the right tempo and the
+wrong phase, on the off-beat of syncopated Latin rhythms.
 
 ## Diagnostics
 
@@ -65,8 +96,9 @@ fits a grid per 20s window, to see where a track drifts.
 
 ## Next
 
-1. Ground truth: beat and downbeat annotations (GTZAN/Ballroom/Harmonix
-   sets, or a Mixxx/Rekordbox library's grids) and an `eval` command.
+1. Better than the baseline above: beat phase on syncopated music, metres
+   other than 4/4, downbeats. And a set nearer what DJs play: Ballroom is
+   no hard tech.
 2. Segments: CLAP embeddings per phrase, so passages can be compared, not
    just tracks.
 3. Transitions: from track A's phrase to track B's, scored on segment
