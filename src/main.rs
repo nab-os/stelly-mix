@@ -7,7 +7,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
+use stelly_audio::clap::AudioEncoder;
 use stelly_mix::eval::{self, Truth};
+use stelly_mix::library::Library;
 
 #[derive(FromArgs)]
 /// Beat grids, phrases and keys for people who mix.
@@ -20,7 +22,36 @@ struct Cli {
 #[argh(subcommand)]
 enum Command {
     Analyse(Analyse),
+    Index(Index),
+    Next(Next),
     Eval(Eval),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "index")]
+/// Analyse and embed every phrase of files and folders into the library.
+struct Index {
+    /// tempos are reported in [MIN, MAX), e.g. 88-176, the default
+    #[argh(option, default = "stelly_mix::tempo::DJ_BPM", from_str_fn(bpm_range))]
+    bpm_range: (f64, f64),
+    /// audio files and folders, searched recursively
+    #[argh(positional)]
+    paths: Vec<PathBuf>,
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "next")]
+/// The best tracks of the library to mix into from this one, and where.
+struct Next {
+    /// how many to list
+    #[argh(option, default = "10")]
+    top: usize,
+    /// largest tempo change, in percent
+    #[argh(option, default = "6.0")]
+    stretch: f64,
+    /// the track playing now; indexed first if it is not yet
+    #[argh(positional)]
+    file: PathBuf,
 }
 
 #[derive(FromArgs)]
@@ -75,7 +106,123 @@ fn main() -> Result<()> {
                 std::process::exit(1);
             }
         }
+        Command::Index(args) => index(&args)?,
+        Command::Next(args) => next(&args)?,
         Command::Eval(args) => evaluate(&args)?,
+    }
+    Ok(())
+}
+
+const AUDIO: [&str; 8] = ["mp3", "flac", "wav", "aif", "aiff", "ogg", "opus", "m4a"];
+
+fn index(args: &Index) -> Result<()> {
+    let library = Library::open(Library::default_dir())?;
+    let mut files = Vec::new();
+    for path in &args.paths {
+        if path.is_dir() {
+            walk(path, &mut |p| files.push(p.to_path_buf()))?;
+        } else {
+            files.push(path.clone());
+        }
+    }
+    files.retain(|f| {
+        let audio = f.extension().and_then(|e| e.to_str()).is_some_and(|e| AUDIO.contains(&e.to_ascii_lowercase().as_str()));
+        audio && library.get(f).is_none()
+    });
+    files.sort();
+    if files.is_empty() {
+        eprintln!("everything is indexed already");
+        return Ok(());
+    }
+    let models = stelly_mix::models::dir();
+    stelly_mix::models::ensure(&models)?;
+
+    let options = stelly_mix::Options {
+        bpm_range: args.bpm_range,
+    };
+    // Each worker holds an ONNX session; a few already keep every core busy.
+    let workers = std::thread::available_parallelism().map_or(2, |n| n.get() / 2).clamp(1, 8);
+    let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
+    let started = Instant::now();
+    std::thread::scope(|scope| -> Result<()> {
+        let handles: Vec<_> = (0..workers)
+            .map(|_| {
+                scope.spawn(|| -> Result<()> {
+                    let mut encoder = AudioEncoder::load(&models, 1)?;
+                    loop {
+                        let i = next.fetch_add(1, Ordering::Relaxed);
+                        let Some(file) = files.get(i) else { return Ok(()) };
+                        match stelly_mix::library::index(file, &options, &mut encoder) {
+                            Ok(track) => {
+                                library.put(&track)?;
+                                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
+                                eprintln!(
+                                    "[{n}/{}] {} — {} phrases",
+                                    files.len(),
+                                    track.name(),
+                                    track.segments.len()
+                                );
+                            }
+                            Err(err) => eprintln!("{}: {err:#}", file.display()),
+                        }
+                    }
+                })
+            })
+            .collect();
+        for handle in handles {
+            handle.join().expect("an indexing worker panicked")?;
+        }
+        Ok(())
+    })?;
+    eprintln!("indexed {} files in {:.0}s", done.into_inner(), started.elapsed().as_secs_f64());
+    Ok(())
+}
+
+fn next(args: &Next) -> Result<()> {
+    let library = Library::open(Library::default_dir())?;
+    let playing = match library.get(&args.file) {
+        Some(track) => track,
+        None => {
+            let models = stelly_mix::models::dir();
+            stelly_mix::models::ensure(&models)?;
+            let mut encoder = AudioEncoder::load(&models, 4)?;
+            let track = stelly_mix::library::index(&args.file, &stelly_mix::Options::default(), &mut encoder)?;
+            library.put(&track)?;
+            track
+        }
+    };
+    let others = library.all()?;
+    let options = stelly_mix::transitions::Options {
+        max_stretch: args.stretch / 100.0,
+    };
+    let transitions = stelly_mix::transitions::from(&playing, &others, &options);
+
+    let key = |t: &stelly_mix::library::Track| t.analysis.key.as_ref().map_or("?".into(), |k| k.camelot.clone());
+    println!(
+        "{}: {:.2} BPM, {}, {} phrases; {} tracks within ±{}%",
+        playing.name(),
+        playing.bpm().unwrap_or(0.0),
+        key(&playing),
+        playing.segments.len(),
+        transitions.len(),
+        args.stretch
+    );
+    for t in transitions.iter().take(args.top) {
+        let next = &others[t.to];
+        let (out, into) = (&playing.segments[t.out], &next.segments[t.into]);
+        println!();
+        println!("{:.2}  {}", t.score, next.name());
+        println!(
+            "      out at {} → in at {}, {:+.1}% tempo, {} → {}{}, sound {:.2}{}",
+            clock(out.start),
+            clock(into.start),
+            (t.ratio - 1.0) * 100.0,
+            key(&playing),
+            key(next),
+            t.key_steps.map_or(String::new(), |s| format!(" ({s} step{})", if s == 1 { "" } else { "s" })),
+            t.sound,
+            t.energy.map_or(String::new(), |e| format!(", {e:+.1} LU")),
+        );
     }
     Ok(())
 }

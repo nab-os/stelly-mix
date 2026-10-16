@@ -6,7 +6,7 @@
 //! the beats stray from that line says whether the track has a grid at all:
 //! a live drummer drifts, and syncing such a track wants the beats, not this.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// How close a beat must be to the grid to count as on it, in seconds. The
 /// tracker alone is good to about half a frame, ~5ms.
@@ -20,7 +20,7 @@ pub const ON_GRID: f64 = 0.020;
 /// stretch, and each stretch disagrees with any one grid.
 const STEADY_STRETCHES: f64 = 0.75;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Grid {
     pub bpm: f64,
     /// Seconds to the first grid line at or after the start of the audio.

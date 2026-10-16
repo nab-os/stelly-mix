@@ -11,18 +11,22 @@ pub mod decode;
 pub mod eval;
 pub mod grid;
 pub mod key;
+pub mod library;
+pub mod models;
+pub mod segments;
 pub mod structure;
 pub mod tempo;
+pub mod transitions;
 
 use anyhow::{Context, Result};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use stelly_audio::decode::Pcm;
 use stelly_audio::descriptors;
 
 pub use grid::Grid;
 pub use key::Key;
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Analysis {
     pub seconds: f64,
     /// The steady grid through the beats, absent with too few of them.

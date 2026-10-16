@@ -9,9 +9,9 @@ name = "stelly-mix"
 path = "src/main.rs"
 
 [dependencies]
-# Decoding and the descriptors, shared with Stelly. CLAP is off until the
-# segment embeddings need it; every codec is on, for local files.
-stelly-audio = { git = "ssh://git@github.com/nab-os/stelly.git", branch = "shared-audio-crate", default-features = false, features = ["all-codecs"] }
+# Decoding, the descriptors and CLAP's audio tower, shared with Stelly; every
+# codec on, for local files.
+stelly-audio = { git = "ssh://git@github.com/nab-os/stelly.git", branch = "shared-audio-crate", features = ["all-codecs"] }
 
 anyhow = "1"
 argh = "0.1.19"
@@ -22,6 +22,9 @@ rusty-opus = "1.0.1"
 realfft = "3.5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# Fetching and checking CLAP's weights, once.
+sha2 = "0.10"
+ureq = "3"
 # Only for demuxing Ogg Opus; the same symphonia stelly-audio decodes with.
 symphonia = { version = "0.6.1", default-features = false, features = ["ogg"] }
 

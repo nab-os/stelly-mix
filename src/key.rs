@@ -1,9 +1,9 @@
 //! Keys the way DJs read them: the Camelot wheel, where a step round the
 //! wheel or across between major and minor is a compatible mix.
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Key {
     /// Pitch class with sharps, "C" .. "B".
     pub tonic: String,
@@ -37,9 +37,37 @@ impl Key {
     }
 }
 
+impl Key {
+    /// Steps between two keys on the wheel: 0 the same key, 1 a fifth either
+    /// way or the relative major or minor, the classic safe moves, more
+    /// beyond. Crossing between rings costs one step on top of the turn.
+    pub fn distance(&self, other: &Key) -> Option<u32> {
+        let (a, ring_a) = parse(&self.camelot)?;
+        let (b, ring_b) = parse(&other.camelot)?;
+        let turn = (a + 12 - b) % 12;
+        Some(turn.min(12 - turn) + u32::from(ring_a != ring_b))
+    }
+}
+
+fn parse(camelot: &str) -> Option<(u32, char)> {
+    let ring = camelot.chars().last()?;
+    Some((camelot[..camelot.len() - 1].parse().ok()?, ring))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distances_round_the_wheel() {
+        let key = |t, s| Key::new(t, s, 1.0).unwrap();
+        let a_minor = key("A", "minor");
+        assert_eq!(a_minor.distance(&a_minor), Some(0));
+        assert_eq!(a_minor.distance(&key("E", "minor")), Some(1)); // 8A -> 9A
+        assert_eq!(a_minor.distance(&key("C", "major")), Some(1)); // 8A -> 8B
+        assert_eq!(a_minor.distance(&key("B", "minor")), Some(2)); // 8A -> 10A
+        assert_eq!(key("G#", "minor").distance(&key("B", "minor")), Some(3)); // 1A -> 10A, the short way
+    }
 
     #[test]
     fn camelot_numbers() {
