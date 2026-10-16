@@ -30,12 +30,15 @@ are not 6.5ms late.
 - **Tempo**: the onset envelope's strongest autocorrelation peaks are each
   tracked, and the one whose beats sit best on a steady grid wins. The
   tallest peak alone picks a triplet pulse on some music (83 for a 125 BPM
-  track). The winner is then brought into 75–175 BPM by doubling, or by
-  halving the grid onto its stronger beats: tracking a rock song directly at
-  112 latches onto the backbeat, while its hi-hats give a clean 224 grid.
+  track). Which octave to report is not the tracker's call: hard tech it
+  follows cleanly at 77.5 and loses at 155 still has a 155 grid. So the
+  winner is moved into a one-octave range, 88–176 by default, by doubling
+  its grid or by halving it onto the stronger beats.
 - **Beats**: Ellis's dynamic programme over Stelly's onset envelope.
   Frame-accurate, about ±5ms.
-- **Grid**: a line fitted through the beats. On produced music it lands on
+- **Grid**: a line fitted through the steadiest 32 beats, then extended to
+  every beat near it, so the beats a tracker wandered through a breakdown
+  are outliers rather than a miscount. On produced music it lands on
   round tempos (148.00, 174.00) and a phase within a couple of milliseconds,
   which is what syncing two decks needs. A track is *steady* when 80% of its
   beats sit within 20ms of the grid; played music drifts, and should be
@@ -47,17 +50,19 @@ are not 6.5ms late.
 
 ## Where it stands
 
-Measured against the Ballroom set (below), on click tracks and a synthetic
-song in the tests, and run on a handful of real tracks.
+Measured against Ballroom's annotations and against beat_this on 159 hard
+tech tracks and 40 others (below), and on click tracks and a synthetic song
+in the tests.
 
 - **Downbeats are weak on real music.** Confidence comes out at 0.02–0.11:
   loops look the same from every beat position. Needs better cues (kick vs.
   snare pattern, harmonic change) and an annotated set to measure against.
-- **The tempo octave is a guess.** Tempos are reported in 75–175 BPM by
-  default, `--bpm-range 100-220` for frenchcore. Inside the range, grid share
-  favours the faster pulse: with `--bpm-range 60-240` Ballroom's Quickstep
-  goes from 0.63 to 0.81 beat F but Samba and Rumba get doubled, 0.79 overall
-  against 0.77. And a hard tech track can track cleanly at 78 and not at 156.
+- **The octave is taste.** 88–176 suits hard tech, techno, house, drum &
+  bass and hip hop at 90; frenchcore wants `--bpm-range 100-200`, and slow
+  hip hop at 85 comes out at 170. Ballroom's waltzes are doubled by it.
+- **Some tracks still tie their tempo to the wrong pulse**, 3:2 or the
+  off-beat: the right tempo is among the candidates for 96% of hard tech,
+  and chosen for 88%.
 - **Beats sit ~6ms late** of Ballroom's annotations (median; quartiles 4 and
   9ms), well inside the tolerance and under a frame.
 
@@ -70,27 +75,18 @@ cargo run --release -- eval --worst 15 data/ballroom/annotations data/ballroom/B
 ```
 
 F-measure at ±70ms for beats and downbeats, Acc1 (tempo within 4%) and Acc2
-(also forgiving ×2, ×½, ×3, ×⅓). Ballroom, 698 clips of 30s:
+(also forgiving ×2, ×½, ×3, ×⅓):
 
-|                     | files | beat F | down F | Acc1  | Acc2  |
-|---------------------|------:|-------:|-------:|------:|------:|
-| ChaChaCha           |   111 |  0.840 |  0.359 | 0.910 | 0.910 |
-| Jive                |    60 |  0.771 |  0.260 | 0.517 | 0.967 |
-| Quickstep           |    82 |  0.626 |  0.436 | 0.000 | 0.963 |
-| Rumba-American      |     7 |  0.816 |  0.554 | 1.000 | 1.000 |
-| Rumba-International |    51 |  0.866 |  0.703 | 0.941 | 1.000 |
-| Rumba-Misc          |    40 |  0.791 |  0.630 | 0.850 | 0.975 |
-| Samba               |    86 |  0.882 |  0.575 | 0.930 | 0.942 |
-| Tango               |    86 |  0.886 |  0.626 | 0.942 | 0.942 |
-| VienneseWaltz       |    65 |  0.555 |  0.326 | 0.031 | 0.615 |
-| Waltz               |   110 |  0.722 |  0.306 | 0.591 | 0.818 |
-| **all**             |   698 |  0.773 |  0.450 | 0.643 | 0.898 |
+| against                          | files | beat F | down F | Acc1  | Acc2  |
+|----------------------------------|------:|-------:|-------:|------:|------:|
+| Ballroom, annotated              |   698 |  0.752 |  0.472 | 0.597 | 0.884 |
+| beat_this, hard tech             |   159 |  0.789 |  0.469 | 0.881 | 0.918 |
+| beat_this, 40 FLACs, all genres  |    40 |  0.697 |  0.477 | 0.550 | 0.900 |
 
-Published trackers reach about 0.9 beat F on this set. Some of the gap is
-deliberate: Quickstep, ~200 BPM, is reported at half tempo by the 75–175
-range, and the waltzes are in 3/4, which neither the halving nor the
-four-beat bars know about. The worst files have the right tempo and the
-wrong phase, on the off-beat of syncopated Latin rhythms.
+Published trackers reach about 0.9 beat F on Ballroom. Some of the gap is
+the octave policy, not the audio: its Quickstep is ~200 BPM and halved, its
+slow dances doubled, and the waltzes are in 3/4, which neither the folding
+nor the four-beat bars know about.
 
 ### Against another tracker
 

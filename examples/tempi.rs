@@ -14,6 +14,11 @@ fn main() -> anyhow::Result<()> {
     for bpm in peaks.iter().chain(&seeds) {
         let tracked = beats::track(&onsets, *bpm);
         let fit = grid::fit(&tracked);
+        let mean = onsets.envelope.iter().sum::<f64>() / onsets.envelope.len() as f64;
+        let salience = tracked.iter().map(|&b| beats::strength(&onsets, b)).sum::<f64>()
+            / tracked.len().max(1) as f64
+            / mean;
+        print!("salience {salience:5.2}  ");
         println!(
             "{bpm:7.2} BPM  -> {} beats, grid {:?} BPM, {:.0}% on grid",
             tracked.len(),

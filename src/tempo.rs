@@ -5,6 +5,12 @@
 //! which can come out on top. Stelly only needs the right family, so takes the
 //! tallest peak; a beat grid needs the right one. So each strong candidate is
 //! tracked, and the one whose beats sit best on a steady grid wins.
+//!
+//! Which octave of it to report is not decided by tracking. A track the
+//! tracker follows cleanly at 77.5 BPM and loses at 155 has a 155 BPM grid
+//! all the same, every other line put in between. So the winner is moved
+//! into a range one octave wide, which settles the octave, and that range is
+//! a matter of taste rather than of the audio.
 
 use crate::beats;
 use crate::grid::{self, Grid};
@@ -15,14 +21,12 @@ const MAX_BPM: f64 = 220.0;
 /// Peaks of the autocorrelation to try.
 const CANDIDATES: usize = 6;
 /// The default octave a tempo is reported in, `[min, max)`. Below it a tempo
-/// is read as half-time and doubled, so a 125 BPM track tracked on its
-/// half-time pulse still says 125; above it, as eighth notes, and halved, so
-/// a rock track whose hi-hats make the steadiest grid says 112, not 224.
-/// Drum & bass stays at 174; frenchcore wants a range of its own.
-pub const DJ_BPM: (f64, f64) = (75.0, 175.0);
-/// Shares of beats on the grid closer than this count as a tie, broken
-/// towards 120 BPM as Stelly's estimate is.
-const TIE: f64 = 0.05;
+/// is read as half-time and doubled, so hard tech tracked on its half-time
+/// pulse still says 155; above it, as eighth notes, and halved, so a rock
+/// track whose hi-hats make the steadiest grid says 112, not 224. Drum &
+/// bass stays at 174 and hip hop at 90; frenchcore wants `100-200`, and
+/// slow hip hop at 85 comes out at 170.
+pub const DJ_BPM: (f64, f64) = (88.0, 176.0);
 
 pub struct Choice {
     pub bpm: f64,
@@ -30,11 +34,11 @@ pub struct Choice {
     pub grid: Option<Grid>,
 }
 
-/// Track with each candidate plus the `hint`, keep the best, and bring it
-/// into `range`, which must span at least an octave.
+/// Track with each candidate plus the `hint`, keep the one most on its grid,
+/// and bring it into `range`, which must span at least an octave.
 pub fn choose(onsets: &Onsets, hint: Option<f64>, range: (f64, f64)) -> Option<Choice> {
     assert!(range.1 >= 2.0 * range.0, "a tempo range must span an octave: {range:?}");
-    let mut tried: Vec<Choice> = candidates(onsets)
+    let tried: Vec<Choice> = candidates(onsets)
         .into_iter()
         .chain(hint)
         .map(|bpm| {
@@ -44,10 +48,7 @@ pub fn choose(onsets: &Onsets, hint: Option<f64>, range: (f64, f64)) -> Option<C
         })
         .collect();
     let share = |c: &Choice| c.grid.as_ref().map_or(0.0, |g| g.on_grid);
-    let best = tried.iter().map(share).fold(0.0, f64::max);
-    let prior = |c: &Choice| -(c.bpm / 120.0).log2().abs();
-    tried.retain(|c| share(c) >= best - TIE);
-    let mut choice = tried.into_iter().max_by(|a, b| prior(a).total_cmp(&prior(b)))?;
+    let mut choice = tried.into_iter().max_by(|a, b| share(a).total_cmp(&share(b)))?;
 
     choice.bpm = choice.grid.as_ref().map_or(choice.bpm, |g| g.bpm);
     while choice.bpm < range.0 && choice.beats.len() >= 2 {
@@ -129,19 +130,13 @@ mod tests {
     use stelly_audio::descriptors;
 
     #[test]
-    fn a_triplet_feel_does_not_win() {
-        // Kicks at 125 BPM, and louder hits every third eighth-note triplet,
-        // so a pulse at two thirds of the tempo correlates strongly too.
-        let (bpm, seconds) = (125.0, 60.0);
-        let mut audio = clicks(bpm, 0.2, seconds);
-        let mut t = 0.2;
-        while t < seconds {
-            kick(&mut audio, (t * RATE as f64) as usize, 1.0);
-            t += 60.0 / (bpm * 2.0 / 3.0);
+    fn the_range_sets_the_octave() {
+        // Hard tech at half time, drum & bass at full and half, hip hop.
+        for (played, reported) in [(77.5, 155.0), (174.0, 174.0), (87.0, 174.0), (90.0, 90.0)] {
+            let onsets = descriptors::onsets(&clicks(played, 0.3, 60.0), RATE);
+            let choice = choose(&onsets, None, DJ_BPM).unwrap();
+            assert!((choice.bpm - reported).abs() < 0.05, "{played} reported as {}", choice.bpm);
         }
-        let onsets = descriptors::onsets(&audio, RATE);
-        let choice = choose(&onsets, Some(bpm * 2.0 / 3.0), DJ_BPM).unwrap();
-        assert!((choice.bpm - bpm).abs() < 0.05, "chose {}", choice.bpm);
     }
 
     #[test]
@@ -171,5 +166,7 @@ mod tests {
         let onsets = descriptors::onsets(&clicks(62.5, 0.3, 60.0), RATE);
         let choice = choose(&onsets, None, DJ_BPM).unwrap();
         assert!((choice.bpm - 125.0).abs() < 0.05, "chose {}", choice.bpm);
+        let grid = choice.grid.unwrap();
+        assert!(grid.steady, "{:.0}% on grid", grid.on_grid * 100.0);
     }
 }

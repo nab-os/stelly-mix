@@ -33,47 +33,49 @@ impl Grid {
     }
 }
 
-/// Least squares of beat time against beat number. Numbers come from the
-/// gaps rather than the index, so a beat the tracker skipped does not shear
-/// the whole line, and outliers are dropped before a refit.
+/// Beats in the stretch the grid is first fitted to.
+const SEED_BEATS: usize = 32;
+
+/// The grid most of the beats agree on. Fitted first to the steadiest
+/// stretch of `SEED_BEATS`, then extended: every beat numbered by the grid
+/// line nearest it, the line refitted through those on it, until that stops
+/// changing. A breakdown the tracker wandered through is then just beats off
+/// the grid, rather than a miscount that shears everything after it.
 pub fn fit(beats: &[f64]) -> Option<Grid> {
     if beats.len() < 8 {
         return None;
     }
-    let mut gaps: Vec<f64> = beats.windows(2).map(|w| w[1] - w[0]).collect();
-    gaps.sort_by(f64::total_cmp);
-    let rough = gaps[gaps.len() / 2];
+    let (mut origin, mut period) = seed(beats)?;
 
-    // Each beat numbered from the gap to the one before it, which a rough
-    // period gets right; counting from the first beat would let its error
-    // pile up over a few hundred beats.
-    let mut number = 0.0;
-    let numbered: Vec<(f64, f64)> = beats
+    // The seed's period is good to a fraction of a millisecond, which over a
+    // few hundred beats can still add up to more than `ON_GRID`: the first
+    // pass takes anything within a quarter beat, the rest only what is on it.
+    let mut tolerance = period / 4.0;
+    let mut kept = 0;
+    for _ in 0..10 {
+        let on: Vec<(f64, f64)> = beats
+            .iter()
+            .map(|&b| (((b - origin) / period).round(), b))
+            .filter(|&(n, b)| (b - (origin + period * n)).abs() <= tolerance)
+            .collect();
+        if on.len() < 8 {
+            break;
+        }
+        (origin, period) = line(&on)?;
+        if tolerance == ON_GRID && on.len() == kept {
+            break;
+        }
+        kept = on.len();
+        tolerance = ON_GRID;
+    }
+
+    let residuals: Vec<f64> = beats
         .iter()
-        .enumerate()
-        .map(|(i, &b)| {
-            if i > 0 {
-                number += ((b - beats[i - 1]) / rough).round().max(1.0);
-            }
-            (number, b)
+        .map(|&b| {
+            let n = ((b - origin) / period).round();
+            b - (origin + period * n)
         })
         .collect();
-    let (origin, period) = line(&numbered)?;
-
-    let residuals: Vec<f64> = numbered.iter().map(|&(i, b)| b - (origin + period * i)).collect();
-    let mut spread: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
-    spread.sort_by(f64::total_cmp);
-    let cutoff = (3.0 * 1.4826 * spread[spread.len() / 2]).max(0.002);
-    let kept: Vec<(f64, f64)> = numbered
-        .iter()
-        .zip(&residuals)
-        .filter(|(_, r)| r.abs() <= cutoff)
-        .map(|(p, _)| *p)
-        .collect();
-    let (origin, period) = line(&kept).unwrap_or((origin, period));
-
-    // Measured over every beat, outliers included.
-    let residuals: Vec<f64> = numbered.iter().map(|&(i, b)| b - (origin + period * i)).collect();
     let n = residuals.len() as f64;
     let rms_ms = (residuals.iter().map(|r| r * r).sum::<f64>() / n).sqrt() * 1e3;
     let on_grid = residuals.iter().filter(|r| r.abs() <= ON_GRID).count() as f64 / n;
@@ -85,6 +87,40 @@ pub fn fit(beats: &[f64]) -> Option<Grid> {
         on_grid,
         steady: on_grid >= STEADY_SHARE,
     })
+}
+
+/// The line through the stretch of beats that sits on one best. Within a
+/// stretch, beats are numbered from the gaps between them, which a skipped
+/// beat cannot fool.
+fn seed(beats: &[f64]) -> Option<(f64, f64)> {
+    let width = SEED_BEATS.min(beats.len());
+    let mut best: Option<((f64, f64), usize)> = None;
+    for start in (0..=beats.len() - width).step_by((width / 4).max(1)) {
+        let stretch = &beats[start..start + width];
+        let mut gaps: Vec<f64> = stretch.windows(2).map(|w| w[1] - w[0]).collect();
+        gaps.sort_by(f64::total_cmp);
+        let rough = gaps[gaps.len() / 2];
+        let mut number = 0.0;
+        let numbered: Vec<(f64, f64)> = stretch
+            .iter()
+            .enumerate()
+            .map(|(i, &b)| {
+                if i > 0 {
+                    number += ((b - stretch[i - 1]) / rough).round().max(1.0);
+                }
+                (number, b)
+            })
+            .collect();
+        let Some((origin, period)) = line(&numbered) else { continue };
+        let on = numbered
+            .iter()
+            .filter(|&&(n, b)| (b - (origin + period * n)).abs() <= ON_GRID)
+            .count();
+        if best.is_none_or(|(_, most)| on > most) {
+            best = Some(((origin, period), on));
+        }
+    }
+    best.map(|(line, _)| line)
 }
 
 /// Intercept and slope of y on x.
@@ -122,6 +158,26 @@ mod tests {
         assert!((grid.bpm - bpm).abs() < 0.01, "{}", grid.bpm);
         assert!((grid.first_beat - offset).abs() < 0.002, "{}", grid.first_beat);
         assert!(grid.steady);
+    }
+
+    /// A breakdown with no kick: the tracker wanders off at its own spacing,
+    /// then the drop brings it back onto the grid. Twice.
+    #[test]
+    fn breakdowns_do_not_shear_the_grid() {
+        let (bpm, offset) = (155.0, 0.3);
+        let period = 60.0 / bpm;
+        let on = |i: usize| offset + period * i as f64;
+        let mut beats: Vec<f64> = (0..120).map(on).collect();
+        beats.extend((0..10).map(|k| on(120) + 0.137 + 1.37 * period * k as f64));
+        beats.extend((135..300).map(on));
+        beats.extend((0..12).map(|k| on(300) + 0.21 + 1.43 * period * k as f64));
+        beats.extend((320..500).map(on));
+
+        let grid = fit(&beats).unwrap();
+        assert!((grid.bpm - bpm).abs() < 0.01, "{}", grid.bpm);
+        let phase = (grid.first_beat - offset).abs();
+        assert!(phase < 0.002, "first beat {}", grid.first_beat);
+        assert!(grid.on_grid > 0.95, "{:.0}% on grid", grid.on_grid * 100.0);
     }
 
     #[test]
