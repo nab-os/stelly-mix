@@ -22,6 +22,10 @@ rusty-opus = "1.0.1"
 realfft = "3.5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+# CLAP's text tower, for finding tracks by description: ONNX Runtime pinned
+# to what stelly-audio runs, and the tokenizer Stelly uses.
+ort = { version = "=2.0.0-rc.13", features = ["download-binaries"] }
+tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
 # Loudness for matching levels in renders, stereo, as the ear hears it.
 ebur128 = "0.1.10"
 # Fetching and checking CLAP's weights, once.

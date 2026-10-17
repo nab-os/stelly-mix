@@ -26,7 +26,20 @@ enum Command {
     Next(Next),
     Mix(Mix),
     Set(Set),
+    Find(Find),
     Eval(Eval),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "find")]
+/// The library's tracks that sound most like a description.
+struct Find {
+    /// how many to list
+    #[argh(option, default = "15")]
+    top: usize,
+    /// what to look for, e.g. "chill downtempo with soft pads"
+    #[argh(positional)]
+    description: String,
 }
 
 #[derive(FromArgs)]
@@ -48,9 +61,13 @@ struct Set {
     /// partial sets carried forward while planning
     #[argh(option, default = "8")]
     beam: usize,
-    /// the track to start from; indexed first if it is not yet
+    /// keep the set sounding like this, e.g. "chill downtempo"
+    #[argh(option)]
+    like: Option<String>,
+    /// the track to start from, indexed first if it is not yet; with
+    /// `--like`, the library's best match when left out
     #[argh(positional)]
-    first: PathBuf,
+    first: Option<PathBuf>,
 }
 
 #[derive(FromArgs)]
@@ -163,6 +180,7 @@ fn main() -> Result<()> {
         Command::Next(args) => next(&args)?,
         Command::Mix(args) => mix(&args)?,
         Command::Set(args) => set(&args)?,
+        Command::Find(args) => find(&args)?,
         Command::Eval(args) => evaluate(&args)?,
     }
     Ok(())
@@ -290,18 +308,55 @@ fn mix(args: &Mix) -> Result<()> {
     Ok(())
 }
 
+/// Every library track's likeness to `description`, 0..1 by rank.
+fn liking(tracks: &[stelly_mix::library::Track], description: &str) -> Result<Vec<f64>> {
+    let models = stelly_mix::models::dir();
+    stelly_mix::models::ensure_text(&models)?;
+    let mut encoder = stelly_mix::text::TextEncoder::load(&models)?;
+    stelly_mix::text::scores(&mut encoder, tracks, description)
+}
+
+fn find(args: &Find) -> Result<()> {
+    let tracks = Library::open(Library::default_dir())?.all()?;
+    let like = liking(&tracks, &args.description)?;
+    let mut order: Vec<usize> = (0..tracks.len()).collect();
+    order.sort_by(|&a, &b| like[b].total_cmp(&like[a]));
+    for &i in order.iter().take(args.top) {
+        let track = &tracks[i];
+        println!(
+            "{:.2}  {}  ({:.0} BPM, {})",
+            like[i],
+            track.name(),
+            track.bpm().unwrap_or(0.0),
+            track.analysis.key.as_ref().map_or("?", |k| k.camelot.as_str())
+        );
+    }
+    Ok(())
+}
+
 fn set(args: &Set) -> Result<()> {
     let library = Library::open(Library::default_dir())?;
-    let first = indexed(&library, &args.first)?;
+    if let Some(first) = &args.first {
+        indexed(&library, first)?;
+    }
     let tracks = library.all()?;
-    let start = tracks
-        .iter()
-        .position(|t| t.path == first.path)
-        .context("the first track is not in the library")?;
+    let like = args.like.as_deref().map(|d| liking(&tracks, d)).transpose()?;
+    let start = match (&args.first, &like) {
+        (Some(first), _) => {
+            let path = first.canonicalize()?;
+            tracks.iter().position(|t| t.path == path).context("the first track is not in the library")?
+        }
+        (None, Some(like)) => (0..tracks.len())
+            .filter(|&i| tracks[i].bpm().is_some() && tracks[i].analysis.grid.as_ref().is_some_and(|g| g.steady))
+            .max_by(|&a, &b| like[a].total_cmp(&like[b]))
+            .context("the library is empty")?,
+        (None, None) => anyhow::bail!("give a first track, or --like to start from the best match"),
+    };
     let options = stelly_mix::set::Options {
         seconds: args.minutes * 60.0,
         max_stretch: args.stretch / 100.0,
         beam: args.beam,
+        like,
         ..Default::default()
     };
     let plan = stelly_mix::set::plan(&tracks, start, &options).context("the first track has no tempo")?;

@@ -25,7 +25,17 @@ pub struct Options {
     /// of its transition out: without it a track can come in and go out
     /// again a phrase later, barely heard.
     pub min_play: f64,
+    /// How much each library track sounds like what the set should, 0..1,
+    /// from `text::scores`: tracks under `LIKE_FLOOR` are left out, and the
+    /// rest count towards a transition's score.
+    pub like: Option<Vec<f64>>,
 }
+
+/// Rank under which a track is too far from the set's description to play.
+const LIKE_FLOOR: f64 = 0.6;
+/// How much sounding like the description counts, against a transition's
+/// own score, which is 0..1.
+const LIKE_WEIGHT: f64 = 0.3;
 
 impl Default for Options {
     fn default() -> Self {
@@ -35,6 +45,7 @@ impl Default for Options {
             beam: 8,
             branch: 6,
             min_play: 90.0,
+            like: None,
         }
     }
 }
@@ -81,14 +92,17 @@ pub fn plan(library: &[Track], first: usize, options: &Options) -> Option<Plan> 
             let playing = &library[last];
             // Where the playing track came in, in its own seconds.
             let entered = plan.transitions.last().map_or(0.0, |t| playing.segments[t.into].start);
-            let steps = transitions::from_allowed(playing, library, &ranking, |i, _| !plan.tracks.contains(&i));
+            let liked = |i: usize| options.like.as_ref().map_or(1.0, |like| like[i]);
+            let steps = transitions::from_allowed(playing, library, &ranking, |i, _| {
+                !plan.tracks.contains(&i) && liked(i) >= LIKE_FLOOR
+            });
             let mut extended = false;
             let long_enough = |step: &Transition| (playing.segments[step.out].start - entered) * rate(playing) >= options.min_play;
             for step in steps.into_iter().filter(long_enough).take(options.branch) {
                 let leaves = playing.segments[step.out].start;
                 let mut next = plan.clone();
                 next.seconds += (leaves - entered) * rate(playing);
-                next.score += step.score;
+                next.score += step.score + options.like.as_ref().map_or(0.0, |_| LIKE_WEIGHT * liked(step.to));
                 next.tracks.push(step.to);
                 next.transitions.push(step);
                 extended = true;

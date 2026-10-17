@@ -75,6 +75,22 @@ Engine: 12 tracks in 34 minutes, each solo section within -9.9 to -12.3
 LUFS, and the 20s windows around every transition 85–100% on one grid, but
 one at 70%.
 
+`find` and `set --like` look for a sound by description, through CLAP's text
+tower, the same weights as Stelly's text steering:
+
+```sh
+cargo run --release -- find "chill relaxed downtempo electronic music"
+cargo run --release -- set --like "chill relaxed downtempo electronic music" --out chill.wav
+```
+
+A track scores by how much nearer its phrases are to the description than to
+plain "music", which on its own mostly measures sounding like music at all,
+ranked across the library. "aggressive hard techno" puts the hard tech folder
+at a mean rank of 0.80 against 0.38 for the rest; "chill relaxed downtempo"
+at 0.33 against 0.57. With `--like`, a set leaves out tracks under the 60th
+percentile, counts the rest towards each transition, and starts from the best
+match when no first track is given.
+
 Levels are matched the way a DJ trims: each track's main sections, the 80th
 percentile of its phrases' stereo loudness, not its average, which a quiet
 intro drags down, and not the analysis's mono figure, which reads a wide

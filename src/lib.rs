@@ -18,6 +18,7 @@ pub mod segments;
 pub mod set;
 pub mod structure;
 pub mod tempo;
+pub mod text;
 pub mod transitions;
 
 use anyhow::{Context, Result};
