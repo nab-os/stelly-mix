@@ -1,10 +1,10 @@
 //! Stelly's server as stelly-mix's: it holds the mix analysis of every track
 //! it has been asked to, and hands out signed URLs for their audio.
 //!
-//! `sync` mirrors its mix library into the local one, as `qobuz:<id>`
-//! entries, the same that a Qobuz source would make, so what is already here
-//! is not fetched twice; and as a source named `qobuz` it fetches a track's
-//! audio when it is to be heard. Everything else, next, sets, renders, finds,
+//! `sync` mirrors its mix library into the local one, as `<provider>:<id>`
+//! entries, named after the server's music provider, `qobuz:<id>` for
+//! Qobuz, so what is already here is not fetched twice; and as a source of
+//! that name it fetches a track's audio when it is to be heard. Everything else, next, sets, renders, finds,
 //! then runs here on the mirror, offline included.
 //!
 //! It wants `STELLY_SERVER` and `STELLY_TOKEN`, from the environment or
@@ -23,14 +23,19 @@ use std::time::Duration;
 
 /// Entries asked for at once while syncing.
 const CHUNK: usize = 200;
-/// Qobuz's formats: FLAC 16/44.1, and MP3 320 for analysing.
-const FLAC_CD: u32 = 6;
-const MP3_320: u32 = 5;
+/// What a server before providers had behind it, and what it says it has
+/// when it cannot say.
+const OLDEST_PROVIDER: &str = "qobuz";
+/// Extensions a fetched track may have been kept under.
+const KEPT: [&str; 8] = ["flac", "mp3", "ogg", "opus", "m4a", "wav", "aiff", "audio"];
 
 pub struct Stelly {
     base: String,
     token: String,
     agent: ureq::Agent,
+    /// The server's music provider's name: what its tracks' origins are
+    /// prefixed with.
+    provider: String,
 }
 
 impl Stelly {
@@ -54,7 +59,13 @@ impl Stelly {
             .timeout_connect(Some(Duration::from_secs(10)))
             .build()
             .new_agent();
-        Some(Self { base: base.trim_end_matches('/').to_string(), token, agent })
+        let mut stelly = Self { base: base.trim_end_matches('/').to_string(), token, agent, provider: OLDEST_PROVIDER.into() };
+        if let Ok(capabilities) = stelly.get::<Value>("/api/capabilities", &[]) {
+            if let Some(name) = capabilities["name"].as_str() {
+                stelly.provider = name.to_string();
+            }
+        }
+        Some(stelly)
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
@@ -91,7 +102,7 @@ impl Stelly {
             .library()?
             .into_iter()
             .map(|s| s.id)
-            .filter(|id| library.by_origin(&format!("qobuz:{id}")).is_none())
+            .filter(|id| library.by_origin(&format!("{}:{id}", self.provider)).is_none())
             .collect();
         let mut done = 0;
         report(0, missing.len());
@@ -144,17 +155,30 @@ impl Stelly {
         }
     }
 
-    /// The track's audio in `format_id` into `cache`, unless some is there.
-    fn download(&self, item: &Item, cache: &Path, format_id: u32) -> Result<PathBuf> {
+    /// The track's audio in up to `quality` into `cache`, unless some is
+    /// there: lossy, lossless or hires.
+    fn download(&self, item: &Item, cache: &Path, quality: &str) -> Result<PathBuf> {
         if let Some(file) = self.cached(item, cache) {
             return Ok(file);
         }
         std::fs::create_dir_all(cache).with_context(|| format!("creating {}", cache.display()))?;
-        let url: Value = self.get(&format!("/api/tracks/{}/url", item.id), &[("format", format_id.to_string())])?;
+        let url: Value = self.get(&format!("/api/tracks/{}/url", item.id), &[("quality", quality.to_string())])?;
         let url = url["url"].as_str().context("Stelly's server gave no URL")?;
-        let extension = if format_id == MP3_320 { "mp3" } else { "flac" };
-        let target = cache.join(format!("{}.{extension}", item.file_stem()));
         let mut response = ureq::get(url).call().with_context(|| format!("downloading {}", item.title))?;
+        // What came, which is not always what was asked for.
+        let mime = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
+        let extension = match () {
+            _ if mime.contains("mpeg") || mime.contains("mp3") => "mp3",
+            _ if mime.contains("flac") => "flac",
+            _ if mime.contains("opus") => "opus",
+            _ if mime.contains("ogg") => "ogg",
+            _ if mime.contains("mp4") || mime.contains("m4a") || mime.contains("aac") => "m4a",
+            _ if mime.contains("wav") => "wav",
+            _ if mime.contains("aiff") => "aiff",
+            _ if quality == "lossy" => "mp3",
+            _ => "flac",
+        };
+        let target = cache.join(format!("{}.{extension}", item.file_stem()));
         let mut body = response.body_mut().with_config().limit(1 << 31).reader();
         let partial = target.with_extension(format!("{}.part", std::process::id()));
         let fetched = (|| -> Result<()> {
@@ -205,18 +229,20 @@ fn item(track: &Value) -> Option<Item> {
     })
 }
 
-/// Qobuz's tracks by way of Stelly: `qobuz:<id>` is a track of its space.
+/// The provider's tracks by way of Stelly: `<provider>:<id>` is a track of
+/// its space.
 impl Source for Stelly {
     fn name(&self) -> &str {
-        "qobuz"
+        &self.provider
     }
 
     fn resolve(&self, reference: &str) -> Result<Vec<Item>> {
-        let id: i64 = reference.parse().with_context(|| format!("qobuz:{reference}: expected a track id"))?;
+        let provider = &self.provider;
+        let id: i64 = reference.parse().with_context(|| format!("{provider}:{reference}: expected a track id"))?;
         let tracks: Vec<Value> = self.post("/api/space/tracks", &serde_json::json!({ "ids": [id] }))?;
         let items: Vec<Item> = tracks.iter().filter_map(item).collect();
         if items.is_empty() {
-            bail!("qobuz:{reference}: not in Stelly's space");
+            bail!("{provider}:{reference}: not in Stelly's space");
         }
         Ok(items)
     }
@@ -228,15 +254,15 @@ impl Source for Stelly {
 
     fn cached(&self, item: &Item, cache: &Path) -> Option<PathBuf> {
         let stem = item.file_stem();
-        ["flac", "mp3"].iter().map(|e| cache.join(format!("{stem}.{e}"))).find(|p| p.is_file())
+        KEPT.iter().map(|e| cache.join(format!("{stem}.{e}"))).find(|p| p.is_file())
     }
 
     fn fetch(&self, item: &Item, cache: &Path) -> Result<PathBuf> {
-        self.download(item, cache, FLAC_CD)
+        self.download(item, cache, "lossless")
     }
 
     fn fetch_for_analysis(&self, item: &Item, cache: &Path) -> Result<PathBuf> {
-        self.download(item, cache, MP3_320)
+        self.download(item, cache, "lossy")
     }
 }
 
