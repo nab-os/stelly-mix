@@ -361,11 +361,13 @@ fn set(args: &Set) -> Result<()> {
     };
     let plan = stelly_mix::set::plan(&tracks, start, &options).context("the first track has no tempo")?;
     let chain: Vec<&stelly_mix::library::Track> = plan.tracks.iter().map(|&i| &tracks[i]).collect();
+    let transitions_mean =
+        plan.transitions.iter().map(|t| t.score).sum::<f64>() / plan.transitions.len().max(1) as f64;
     eprintln!(
         "{} tracks, {} transitions averaging {:.2}, {} before the last comes in",
         chain.len(),
         plan.transitions.len(),
-        plan.mean_score(),
+        transitions_mean,
         clock(plan.seconds)
     );
 

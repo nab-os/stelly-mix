@@ -31,6 +31,17 @@ pub struct Options {
     pub like: Option<Vec<f64>>,
 }
 
+/// A transition scoring under this is not taken, however good the rest of
+/// the set: the plan maximises the average, which one bad transition can
+/// hide in.
+const MIN_TRANSITION: f64 = 0.5;
+
+/// Whether two library entries are the same recording: the same name, one
+/// a FLAC and one an MP3 of it, or a copy in a playlist folder.
+fn same_recording(a: &Track, b: &Track) -> bool {
+    a.name().to_lowercase() == b.name().to_lowercase() && (a.analysis.seconds - b.analysis.seconds).abs() < 2.0
+}
+
 /// Rank under which a track is too far from the set's description to play.
 const LIKE_FLOOR: f64 = 0.6;
 /// How much sounding like the description counts, against a transition's
@@ -93,12 +104,14 @@ pub fn plan(library: &[Track], first: usize, options: &Options) -> Option<Plan> 
             // Where the playing track came in, in its own seconds.
             let entered = plan.transitions.last().map_or(0.0, |t| playing.segments[t.into].start);
             let liked = |i: usize| options.like.as_ref().map_or(1.0, |like| like[i]);
-            let steps = transitions::from_allowed(playing, library, &ranking, |i, _| {
-                !plan.tracks.contains(&i) && liked(i) >= LIKE_FLOOR
+            let steps = transitions::from_allowed(playing, library, &ranking, |i, next| {
+                let played = plan.tracks.iter().any(|&p| p == i || same_recording(&library[p], next));
+                !played && liked(i) >= LIKE_FLOOR
             });
             let mut extended = false;
             let long_enough = |step: &Transition| (playing.segments[step.out].start - entered) * rate(playing) >= options.min_play;
-            for step in steps.into_iter().filter(long_enough).take(options.branch) {
+            let good = |step: &Transition| step.score >= MIN_TRANSITION;
+            for step in steps.into_iter().filter(long_enough).filter(good).take(options.branch) {
                 let leaves = playing.segments[step.out].start;
                 let mut next = plan.clone();
                 next.seconds += (leaves - entered) * rate(playing);
