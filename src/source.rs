@@ -15,13 +15,21 @@
 //!     stelly_mix::cli::run(vec![Box::new(MyService::from_env()?)])
 //! }
 //! ```
+//!
+//! A source's track need not keep its file once analysed: the library entry
+//! remembers where it came from, its `Origin`, and `Sources::audio` fetches
+//! it again when it is to be heard, into a cache that keeps only so much.
 
-use anyhow::{bail, Result};
+use crate::library::{Library, Track};
+use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
+/// How much fetched-again audio is kept, unless `STELLY_MIX_AUDIO_GB` says.
+const AUDIO_CACHE_GB: f64 = 20.0;
+
 /// A track a source can fetch.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Item {
     /// The source's own id for it; `name:id` refers to it.
     pub id: String,
@@ -57,6 +65,37 @@ pub trait Source: Send + Sync {
     fn cached(&self, _item: &Item, _cache: &Path) -> Option<PathBuf> {
         None
     }
+
+    /// The item's audio for analysing, which can be lighter than for
+    /// listening: 48kHz mono is all the analysis reads.
+    fn fetch_for_analysis(&self, item: &Item, cache: &Path) -> Result<PathBuf> {
+        self.fetch(item, cache)
+    }
+
+    /// What the library remembers the item as, to fetch it again: by
+    /// default this source and the item. A source whose tracks are another's
+    /// says so, so that the same track from either is one entry.
+    fn origin(&self, item: &Item) -> Origin {
+        Origin {
+            source: self.name().to_string(),
+            item: item.clone(),
+        }
+    }
+}
+
+/// Where a library track came from, when not a file of its own.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Origin {
+    /// The source that fetches it.
+    pub source: String,
+    pub item: Item,
+}
+
+impl Origin {
+    /// `source:id`, what it is known by.
+    pub fn key(&self) -> String {
+        format!("{}:{}", self.source, self.item.id)
+    }
 }
 
 /// A file an argument comes to, not yet fetched.
@@ -71,6 +110,22 @@ impl Pending<'_> {
         match self {
             Pending::File(path) => Ok(path.clone()),
             Pending::Item(source, item) => source.fetch(item, &cache_dir(source.name())),
+        }
+    }
+
+    /// The file, as light as will do for analysing it.
+    pub fn fetch_for_analysis(&self) -> Result<PathBuf> {
+        match self {
+            Pending::File(path) => Ok(path.clone()),
+            Pending::Item(source, item) => source.fetch_for_analysis(item, &cache_dir(source.name())),
+        }
+    }
+
+    /// Where it comes from, for an item; a file is its own.
+    pub fn origin(&self) -> Option<Origin> {
+        match self {
+            Pending::File(_) => None,
+            Pending::Item(source, item) => Some(source.origin(item)),
         }
     }
 
@@ -149,9 +204,83 @@ impl Sources {
         pending.remove(0).fetch()
     }
 
+    /// The library's entry for `argument`, which must name one track,
+    /// analysing it first if it is not in the library yet. A source's track
+    /// is found by where it came from, so a track whose audio has gone since
+    /// is not fetched to be found.
+    pub fn track(&self, library: &Library, argument: &str) -> Result<Track> {
+        let mut pending = self.pending(argument)?;
+        if pending.len() != 1 {
+            bail!("{argument} names {} tracks, not one", pending.len());
+        }
+        let pending = pending.remove(0);
+        let Some(origin) = pending.origin() else {
+            return library.indexed(&pending.fetch()?);
+        };
+        if let Some(track) = library.by_origin(&origin.key()) {
+            return Ok(track);
+        }
+        let had = pending.cached();
+        let file = pending.fetch_for_analysis()?;
+        let track = library.index_origin(&file, origin)?;
+        // Only what was fetched to be analysed goes; it comes back to be heard.
+        if had.is_none() {
+            let _ = std::fs::remove_file(&file);
+        }
+        Ok(track)
+    }
+
+    /// A library track's audio: its own file while it is there, else fetched
+    /// again from where it came from into a cache of `AUDIO_CACHE_GB`, the
+    /// least lately heard going first.
+    pub fn audio(&self, track: &Track) -> Result<PathBuf> {
+        if track.path.is_file() {
+            return Ok(track.path.clone());
+        }
+        let origin = track
+            .origin
+            .as_ref()
+            .with_context(|| format!("{} is gone, and it came from no source to fetch it again", track.path.display()))?;
+        let source = self
+            .get(&origin.source)
+            .with_context(|| format!("{} came from {}, which this build has no source for", track.name(), origin.source))?;
+        let dir = cache_dir("audio");
+        let file = source.fetch(&origin.item, &dir)?;
+        // Heard now: the last to go.
+        if let Ok(handle) = std::fs::File::options().write(true).open(&file) {
+            let _ = handle.set_modified(std::time::SystemTime::now());
+        }
+        let cap = std::env::var("STELLY_MIX_AUDIO_GB").ok().and_then(|v| v.parse::<f64>().ok()).unwrap_or(AUDIO_CACHE_GB);
+        trim(&dir, (cap * 1e9) as u64, &file);
+        Ok(file)
+    }
+
     fn split<'a>(&self, argument: &'a str) -> Option<(&dyn Source, &'a str)> {
         let (name, rest) = argument.split_once(':')?;
         Some((self.get(name)?, rest))
+    }
+}
+
+/// Delete the least lately used files in `dir` until it holds no more than
+/// `cap` bytes, never `keep`.
+fn trim(dir: &Path, cap: u64, keep: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let mut files: Vec<(std::time::SystemTime, u64, PathBuf)> = entries
+        .flatten()
+        .filter_map(|e| {
+            let meta = e.metadata().ok().filter(|m| m.is_file())?;
+            Some((meta.modified().ok()?, meta.len(), e.path()))
+        })
+        .collect();
+    let mut total: u64 = files.iter().map(|f| f.1).sum();
+    files.sort();
+    for (_, size, path) in files {
+        if total <= cap {
+            break;
+        }
+        if path != keep && std::fs::remove_file(&path).is_ok() {
+            total -= size;
+        }
     }
 }
 
@@ -210,6 +339,25 @@ mod tests {
         assert!(file.starts_with(cache_dir("fake")));
         assert_eq!(sources.files("fake:all").unwrap().len(), 2);
         assert!(sources.file("fake:all").is_err());
+    }
+
+    #[test]
+    fn the_cache_lets_the_least_lately_heard_go_first() {
+        let dir = std::env::temp_dir().join(format!("stelly-mix-trim-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let now = std::time::SystemTime::now();
+        for (i, name) in ["old", "middle", "new"].iter().enumerate() {
+            let path = dir.join(name);
+            std::fs::write(&path, vec![0u8; 100]).unwrap();
+            let file = std::fs::File::options().write(true).open(&path).unwrap();
+            file.set_modified(now - std::time::Duration::from_secs(100 - i as u64 * 10)).unwrap();
+        }
+        // The oldest is the one being heard: kept, and the next oldest goes.
+        trim(&dir, 200, &dir.join("old"));
+        let left: std::collections::BTreeSet<String> =
+            std::fs::read_dir(&dir).unwrap().map(|e| e.unwrap().file_name().into_string().unwrap()).collect();
+        assert_eq!(left, ["new".to_string(), "old".to_string()].into());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

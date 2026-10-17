@@ -5,18 +5,22 @@
 //! Decoding and the descriptors come from `stelly-audio`, shared with Stelly;
 //! everything about time, beats onwards, lives here.
 
+pub mod api;
 pub mod bands;
 pub mod beats;
 pub mod cli;
 pub mod eval;
 pub mod grid;
+pub mod indexing;
 pub mod key;
 pub mod library;
+pub mod mix;
 pub mod models;
 pub mod render;
 pub mod segments;
 pub mod set;
 pub mod source;
+pub mod stelly;
 pub mod structure;
 pub mod tempo;
 pub mod text;

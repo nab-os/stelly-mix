@@ -9,7 +9,7 @@
 //! the best average transition wins.
 
 use crate::library::Track;
-use crate::transitions::{self, fold, Transition};
+use crate::transitions::{self, fold, same_recording, Transition};
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -29,18 +29,18 @@ pub struct Options {
     /// from `text::scores`: tracks under `LIKE_FLOOR` are left out, and the
     /// rest count towards a transition's score.
     pub like: Option<Vec<f64>>,
+    /// A transition scoring under this is not taken, however good the rest
+    /// of the set: the plan maximises the average, which one bad transition
+    /// can hide in.
+    pub min_transition: f64,
 }
 
-/// A transition scoring under this is not taken, however good the rest of
-/// the set: the plan maximises the average, which one bad transition can
-/// hide in.
-const MIN_TRANSITION: f64 = 0.5;
 
-/// Whether two library entries are the same recording: the same name, one
-/// a FLAC and one an MP3 of it, or a copy in a playlist folder.
-fn same_recording(a: &Track, b: &Track) -> bool {
-    a.name().to_lowercase() == b.name().to_lowercase() && (a.analysis.seconds - b.analysis.seconds).abs() < 2.0
-}
+
+/// The default `min_transition`: with sound scored against each track's
+/// closest matches, a sound that is merely typical of them scores under 0.5,
+/// and a floor there stopped half the sets tried after a few tracks.
+pub const MIN_TRANSITION: f64 = 0.35;
 
 /// Rank under which a track is too far from the set's description to play.
 const LIKE_FLOOR: f64 = 0.6;
@@ -57,6 +57,7 @@ impl Default for Options {
             branch: 6,
             min_play: 90.0,
             like: None,
+            min_transition: MIN_TRANSITION,
         }
     }
 }
@@ -111,7 +112,7 @@ pub fn plan(library: &[Track], first: usize, options: &Options) -> Option<Plan> 
             });
             let mut extended = false;
             let long_enough = |step: &Transition| (playing.segments[step.out].start - entered) * rate(playing) >= options.min_play;
-            let good = |step: &Transition| step.score >= MIN_TRANSITION;
+            let good = |step: &Transition| step.score >= options.min_transition;
             for step in steps.into_iter().filter(long_enough).filter(good).take(options.branch) {
                 let leaves = playing.segments[step.out].start;
                 let mut next = plan.clone();

@@ -10,6 +10,10 @@ repository = "https://github.com/nab-os/stelly-mix"
 name = "stelly-mix"
 path = "src/main.rs"
 
+# The library and its command line here, the window over them in app/.
+[workspace]
+members = [".", "app"]
+
 [dependencies]
 # Decoding (Opus and stereo included), the descriptors, CLAP's two towers and
 # fetching their weights, shared with Stelly; every codec on, for local files.
@@ -17,6 +21,10 @@ stelly-audio = { git = "https://github.com/nab-os/stelly-audio", features = ["al
 
 anyhow = "1"
 argh = "0.1.19"
+# Phrase embeddings stored as 16-bit floats in base64: a fifth of their
+# size as JSON numbers, which were most of every library entry.
+base64 = "0.22"
+half = "2"
 realfft = "3.5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
@@ -24,6 +32,8 @@ serde_json = "1"
 ebur128 = "0.1.10"
 # The library's file names, from the path.
 sha2 = "0.10"
+# Stelly's server: its mix library and its tracks' audio.
+ureq = "3"
 # Keylock for renders: Signalsmith Stretch, compiled from C++, which wants a
 # C++ compiler and libclang at build time.
 signalsmith-stretch = "0.1.3"

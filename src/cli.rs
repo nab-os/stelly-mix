@@ -10,10 +10,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
-use stelly_audio::clap::AudioEncoder;
 use crate::eval::{self, Truth};
 use crate::library::Library;
-use crate::source::{Pending, Source, Sources};
+use crate::source::{Source, Sources};
 
 #[derive(FromArgs)]
 /// Beat grids, phrases and keys for people who mix.
@@ -33,7 +32,20 @@ enum Command {
     Find(Find),
     Search(Search),
     Eval(Eval),
+    Compact(Compact),
+    Sync(Sync),
 }
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "sync")]
+/// Bring Stelly's server's mix analyses into the library: STELLY_SERVER and
+/// STELLY_TOKEN say where it is.
+struct Sync {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "compact")]
+/// Rewrite the library's entries in the current, smaller form.
+struct Compact {}
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "search")]
@@ -84,6 +96,9 @@ struct Set {
     /// keep the set sounding like this, e.g. "chill downtempo"
     #[argh(option)]
     like: Option<String>,
+    /// take no transition scoring under this (default 0.35)
+    #[argh(option, default = "crate::set::MIN_TRANSITION")]
+    min_transition: f64,
     /// the track to start from, indexed first if it is not yet; with
     /// `--like`, the library's best match when left out
     #[argh(positional)]
@@ -124,6 +139,10 @@ struct Index {
     /// tempos are reported in [MIN, MAX), e.g. 88-176, the default
     #[argh(option, default = "crate::tempo::DJ_BPM", from_str_fn(bpm_range))]
     bpm_range: (f64, f64),
+    /// keep a source's tracks' audio once analysed, rather than fetching it
+    /// again to be heard
+    #[argh(switch)]
+    keep_audio: bool,
     /// audio files and folders, searched recursively
     #[argh(positional)]
     paths: Vec<String>,
@@ -208,16 +227,25 @@ pub fn run(sources: Vec<Box<dyn Source>>) -> Result<()> {
         Command::Find(args) => find(&args)?,
         Command::Search(args) => search(&args, &sources)?,
         Command::Eval(args) => evaluate(&args)?,
+        Command::Sync(_) => {
+            let stelly = crate::stelly::Stelly::from_env().context("set STELLY_SERVER and STELLY_TOKEN to sync from Stelly's server")?;
+            let library = Library::open(Library::default_dir())?;
+            let started = Instant::now();
+            let done = stelly.sync(&library, &|done, total| {
+                if total > 0 && done > 0 {
+                    eprintln!("{done} of {total}");
+                }
+            })?;
+            eprintln!("brought {done} entries in {:.0}s", started.elapsed().as_secs_f64());
+        }
+        Command::Compact(_) => {
+            let library = Library::open(Library::default_dir())?;
+            let started = Instant::now();
+            let done = library.compact()?;
+            eprintln!("rewrote {done} entries in {:.0}s", started.elapsed().as_secs_f64());
+        }
     }
     Ok(())
-}
-
-const AUDIO: [&str; 8] = ["mp3", "flac", "wav", "aif", "aiff", "ogg", "opus", "m4a"];
-
-fn is_audio(path: &Path) -> bool {
-    path.extension()
-        .and_then(|e| e.to_str())
-        .is_some_and(|e| AUDIO.contains(&e.to_ascii_lowercase().as_str()))
 }
 
 fn search(args: &Search, sources: &Sources) -> Result<()> {
@@ -244,101 +272,29 @@ fn search(args: &Search, sources: &Sources) -> Result<()> {
 
 fn index(args: &Index, sources: &Sources) -> Result<()> {
     let library = Library::open(Library::default_dir())?;
-    let mut files = Vec::new();
-    for argument in &args.paths {
-        let path = Path::new(argument);
-        if path.is_dir() {
-            walk(path, &mut |p| files.push(Pending::File(p.to_path_buf())))?;
-        } else {
-            files.extend(sources.pending(argument)?);
-        }
-    }
-    // What is here and indexed already is passed over. The rest is fetched
-    // by the workers, so a playlist is analysed as it comes down rather than
-    // after the last of it has.
-    // Indexed in another octave is not indexed: `--bpm-range` asks again.
-    let in_range = |file: &Path| library.get(file).is_some_and(|t| t.bpm_range == args.bpm_range);
-    files.retain(|p| p.cached().is_none_or(|f| is_audio(&f) && !in_range(&f)));
-    files.sort_by_key(|p| match p {
-        Pending::File(f) => Some(f.clone()),
-        Pending::Item(..) => None,
-    });
-    if files.is_empty() {
-        eprintln!("everything is indexed already");
-        return Ok(());
-    }
-    let models = crate::models::dir();
-    crate::models::ensure(&models)?;
-
+    let files = crate::indexing::gather(&args.paths, sources)?;
     let options = crate::Options {
         bpm_range: args.bpm_range,
     };
-    // Each worker holds an ONNX session; a few already keep every core busy.
-    let workers = std::thread::available_parallelism().map_or(2, |n| n.get() / 2).clamp(1, 8);
-    let (next, done) = (AtomicUsize::new(0), AtomicUsize::new(0));
     let started = Instant::now();
-    std::thread::scope(|scope| -> Result<()> {
-        let handles: Vec<_> = (0..workers)
-            .map(|_| {
-                scope.spawn(|| -> Result<()> {
-                    let mut encoder = AudioEncoder::load(&models, 1)?;
-                    loop {
-                        let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(pending) = files.get(i) else { return Ok(()) };
-                        let file = match pending.fetch() {
-                            Ok(file) => file,
-                            Err(err) => {
-                                eprintln!("{}: {err:#}", pending.name());
-                                continue;
-                            }
-                        };
-                        // A fetched file's name is its source's: checked once it is here.
-                        if matches!(pending, Pending::Item(..)) && (!is_audio(&file) || in_range(&file)) {
-                            continue;
-                        }
-                        match crate::library::index(&file, &options, &mut encoder) {
-                            Ok(track) => {
-                                library.put(&track)?;
-                                let n = done.fetch_add(1, Ordering::Relaxed) + 1;
-                                eprintln!(
-                                    "[{n}/{}] {} — {} phrases",
-                                    files.len(),
-                                    track.name(),
-                                    track.segments.len()
-                                );
-                            }
-                            Err(err) => eprintln!("{}: {err:#}", file.display()),
-                        }
-                    }
-                })
-            })
-            .collect();
-        for handle in handles {
-            handle.join().expect("an indexing worker panicked")?;
+    let done = crate::indexing::run(files, &library, &options, args.keep_audio, &|event| match event {
+        crate::indexing::Event::Starting { total: 0 } => eprintln!("everything is indexed already"),
+        crate::indexing::Event::Starting { .. } => {}
+        crate::indexing::Event::Indexed { done, total, track } => {
+            eprintln!("[{done}/{total}] {} — {} phrases", track.name(), track.segments.len())
         }
-        Ok(())
+        crate::indexing::Event::Failed { name, error } => eprintln!("{name}: {error}"),
     })?;
-    eprintln!("indexed {} files in {:.0}s", done.into_inner(), started.elapsed().as_secs_f64());
-    Ok(())
-}
-
-/// The library's entry for a file, indexing it first if need be.
-fn indexed(library: &Library, file: &Path) -> Result<crate::library::Track> {
-    if let Some(track) = library.get(file) {
-        return Ok(track);
+    if done > 0 {
+        eprintln!("indexed {done} files in {:.0}s", started.elapsed().as_secs_f64());
     }
-    let models = crate::models::dir();
-    crate::models::ensure(&models)?;
-    let mut encoder = AudioEncoder::load(&models, 4)?;
-    let track = crate::library::index(file, &crate::Options::default(), &mut encoder)?;
-    library.put(&track)?;
-    Ok(track)
+    Ok(())
 }
 
 fn mix(args: &Mix, sources: &Sources) -> Result<()> {
     let library = Library::open(Library::default_dir())?;
-    let playing = indexed(&library, &sources.file(&args.from)?)?;
-    let next = indexed(&library, &sources.file(&args.to)?)?;
+    let playing = sources.track(&library, &args.from)?;
+    let next = sources.track(&library, &args.to)?;
     let options = crate::transitions::Options {
         max_stretch: args.stretch / 100.0,
         // Against the library, so this pair's score means what it would in `next`.
@@ -356,8 +312,8 @@ fn mix(args: &Mix, sources: &Sources) -> Result<()> {
                 args.stretch
             )
         })?;
-    let a = crate::decode::decode_file_stereo(&playing.path)?;
-    let b = crate::decode::decode_file_stereo(&next.path)?;
+    let a = crate::decode::decode_file_stereo(&sources.audio(&playing)?)?;
+    let b = crate::decode::decode_file_stereo(&sources.audio(&next)?)?;
     let settings = crate::render::Settings {
         keylock: !args.turntable,
         bass_swap: !args.crossfade,
@@ -382,17 +338,9 @@ fn mix(args: &Mix, sources: &Sources) -> Result<()> {
     Ok(())
 }
 
-/// Every library track's likeness to `description`, 0..1 by rank.
-fn liking(tracks: &[crate::library::Track], description: &str) -> Result<Vec<f64>> {
-    let models = crate::models::dir();
-    crate::models::ensure_text(&models)?;
-    let mut encoder = crate::text::TextEncoder::load(&models)?;
-    crate::text::scores(&mut encoder, tracks, description)
-}
-
 fn find(args: &Find) -> Result<()> {
     let tracks = Library::open(Library::default_dir())?.all()?;
-    let like = liking(&tracks, &args.description)?;
+    let like = crate::text::liking(&tracks, &args.description)?;
     let mut order: Vec<usize> = (0..tracks.len()).collect();
     order.sort_by(|&a, &b| like[b].total_cmp(&like[a]));
     for &i in order.iter().take(args.top) {
@@ -410,16 +358,12 @@ fn find(args: &Find) -> Result<()> {
 
 fn set(args: &Set, sources: &Sources) -> Result<()> {
     let library = Library::open(Library::default_dir())?;
-    let first = args.first.as_deref().map(|f| sources.file(f)).transpose()?;
-    if let Some(first) = &first {
-        indexed(&library, first)?;
-    }
+    let first = args.first.as_deref().map(|f| sources.track(&library, f)).transpose()?;
     let tracks = library.all()?;
-    let like = args.like.as_deref().map(|d| liking(&tracks, d)).transpose()?;
+    let like = args.like.as_deref().map(|d| crate::text::liking(&tracks, d)).transpose()?;
     let start = match (&first, &like) {
         (Some(first), _) => {
-            let path = first.canonicalize()?;
-            tracks.iter().position(|t| t.path == path).context("the first track is not in the library")?
+            tracks.iter().position(|t| t.path == first.path).context("the first track is not in the library")?
         }
         (None, Some(like)) => (0..tracks.len())
             .filter(|&i| tracks[i].bpm().is_some() && tracks[i].analysis.grid.as_ref().is_some_and(|g| g.steady))
@@ -432,6 +376,7 @@ fn set(args: &Set, sources: &Sources) -> Result<()> {
         max_stretch: args.stretch / 100.0,
         beam: args.beam,
         like,
+        min_transition: args.min_transition,
         ..Default::default()
     };
     let plan = crate::set::plan(&tracks, start, &options).context("the first track has no tempo")?;
@@ -453,7 +398,7 @@ fn set(args: &Set, sources: &Sources) -> Result<()> {
         let last_to = chain.last().map_or(0.0, |t| t.analysis.seconds);
         let started = Instant::now();
         let rendered = crate::render::render_chain(&chain, &plan.transitions, 0.0, last_to, &settings, |k| {
-            crate::decode::decode_file_stereo(&chain[k].path)
+            crate::decode::decode_file_stereo(&sources.audio(chain[k])?)
         })?;
         crate::render::write_wav(&args.out, &rendered.audio)?;
         eprintln!(
@@ -493,7 +438,7 @@ fn set(args: &Set, sources: &Sources) -> Result<()> {
 
 fn next(args: &Next, sources: &Sources) -> Result<()> {
     let library = Library::open(Library::default_dir())?;
-    let playing = indexed(&library, &sources.file(&args.file)?)?;
+    let playing = sources.track(&library, &args.file)?;
     let others = library.all()?;
     let options = crate::transitions::Options {
         max_stretch: args.stretch / 100.0,
@@ -544,13 +489,13 @@ struct Scored {
 fn evaluate(args: &Eval) -> Result<()> {
     // Every audio file under each name: two folders can each have one.
     let mut audio: HashMap<String, Vec<PathBuf>> = HashMap::new();
-    walk(&args.audio, &mut |path| {
+    crate::indexing::walk(&args.audio, &mut |path| {
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
             audio.entry(stem.to_string()).or_default().push(path.to_path_buf());
         }
     })?;
     let mut pairs = Vec::new();
-    walk(&args.annotations, &mut |path| {
+    crate::indexing::walk(&args.annotations, &mut |path| {
         if path.extension().is_some_and(|e| e == "beats") {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
             match audio.get(stem).map(Vec::as_slice) {
@@ -647,18 +592,6 @@ fn score(truth: &Path, file: &Path, options: &crate::Options) -> Result<Scored> 
 }
 
 /// Every file under `dir`.
-fn walk(dir: &Path, visit: &mut dyn FnMut(&Path)) -> Result<()> {
-    for entry in std::fs::read_dir(dir).with_context(|| format!("reading {}", dir.display()))? {
-        let path = entry?.path();
-        if path.is_dir() {
-            walk(&path, visit)?;
-        } else {
-            visit(&path);
-        }
-    }
-    Ok(())
-}
-
 fn analyse(file: &Path, json: bool, options: &crate::Options) -> Result<()> {
     let started = Instant::now();
     let pcm = crate::decode::decode_file(file)?;

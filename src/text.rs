@@ -14,7 +14,16 @@ use anyhow::Result;
 pub use stelly_audio::clap::TextEncoder;
 
 /// What a description is measured against.
-const BASELINE: &str = "music";
+pub const BASELINE: &str = "music";
+
+/// Every track's likeness to `description`, 0..1 by rank, the text tower
+/// fetched first if it is not there yet.
+pub fn liking(tracks: &[Track], description: &str) -> Result<Vec<f64>> {
+    let models = crate::models::dir();
+    crate::models::ensure_text(&models)?;
+    let mut encoder = TextEncoder::load(&models)?;
+    scores(&mut encoder, tracks, description)
+}
 
 /// How much each track sounds like `description`, as its rank across the
 /// library: 1 the most, 0 the least. A track is its phrases' mean, so a
@@ -22,6 +31,13 @@ const BASELINE: &str = "music";
 pub fn scores(encoder: &mut TextEncoder, tracks: &[Track], description: &str) -> Result<Vec<f64>> {
     let query = encoder.embed(description)?;
     let baseline = encoder.embed(BASELINE)?;
+    Ok(scores_for(&query, &baseline, tracks))
+}
+
+/// What `scores` makes of a description and the baseline, already embedded
+/// by any text tower of the same model: a server with its own loaded scores
+/// with it rather than loading a second.
+pub fn scores_for(query: &[f32], baseline: &[f32], tracks: &[Track]) -> Vec<f64> {
     let raw: Vec<f64> = tracks
         .iter()
         .map(|track| {
@@ -29,7 +45,7 @@ pub fn scores(encoder: &mut TextEncoder, tracks: &[Track], description: &str) ->
             track
                 .segments
                 .iter()
-                .map(|s| dot(&s.embedding, &query) - dot(&s.embedding, &baseline))
+                .map(|s| dot(&s.embedding, query) - dot(&s.embedding, baseline))
                 .sum::<f64>()
                 / n
         })
@@ -40,7 +56,7 @@ pub fn scores(encoder: &mut TextEncoder, tracks: &[Track], description: &str) ->
     for (rank, &i) in order.iter().enumerate() {
         ranks[i] = rank as f64 / (raw.len().max(2) - 1) as f64;
     }
-    Ok(ranks)
+    ranks
 }
 
 fn dot(a: &[f32], b: &[f32]) -> f64 {

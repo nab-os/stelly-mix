@@ -103,6 +103,48 @@ other; peaks are held at -1 dBFS.
 
 Building it wants a C++ compiler and libclang, for Signalsmith Stretch.
 
+## Stelly's server
+
+[Stelly](https://github.com/nab-os/stelly)'s server can hold the mix analysis
+too, of whatever it is asked to (`stelly-server mix-analyse`, see its README),
+next to the coarse analysis its space is built from. Point stelly-mix at it:
+
+```sh
+export STELLY_SERVER=http://127.0.0.1:7700 STELLY_TOKEN=<a device's token>
+cargo run --release -- sync      # mirror what it has analysed into the library
+cargo run --release -- next qobuz:<track id>
+```
+
+`sync` brings its entries in as `qobuz:<id>` tracks, and the server is then a
+`qobuz` source: their audio comes from its signed URLs when a track is played,
+mixed or rendered, into the same capped cache as any source's. The app syncs
+at start. The two settings can also go in `~/.config/stelly-mix/stelly.env`.
+
+## The app
+
+`app/` is stelly-mix in a window, on Dioxus like Stelly's app: the library
+with indexing, a track's waveform with its bars, phrases and sections, where
+to go next with each transition one click from being heard, sets planned,
+rendered and played, and the library searched by description.
+
+```sh
+cargo run --release -p stelly-mix-app
+```
+
+It draws into the system webview, so on Linux the build wants GTK and
+WebKitGTK headers:
+
+```sh
+sudo apt install build-essential pkg-config libwebkit2gtk-4.1-dev \
+  libgtk-3-dev libsoup-3.0-dev libxdo-dev libayatana-appindicator3-dev \
+  librsvg2-dev libssl-dev
+```
+
+Audio reaches the window from a server on 127.0.0.1 that serves only what
+the app registers, under a token made at start. Renders go to
+`~/.cache/stelly-mix/renders`. A build with sources opens it with
+`stelly_mix_app::run(sources)`, as the command line's `cli::run`.
+
 ## How it works
 
 Decoding, Opus included, the descriptors (tempo estimate, key, loudness),

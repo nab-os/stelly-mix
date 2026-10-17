@@ -28,8 +28,43 @@ pub struct Segment {
     /// Detected onsets a second: how busy.
     pub onset_rate: Option<f64>,
     pub key: Option<Key>,
-    /// CLAP's 512-d audio embedding, L2-normalised.
+    /// CLAP's 512-d audio embedding, L2-normalised. Stored as 16-bit floats,
+    /// see `compact`.
+    #[serde(with = "compact")]
     pub embedding: Vec<f32>,
+}
+
+/// An embedding on disk as base64 of little-endian 16-bit floats: 1.4KB for
+/// 512 dimensions where JSON numbers took 6–7KB, and a cosine unchanged to
+/// the fourth decimal. Entries written before read as the numbers they hold.
+pub mod compact {
+    use base64::engine::general_purpose::STANDARD;
+    use base64::Engine;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(embedding: &[f32], serializer: S) -> Result<S::Ok, S::Error> {
+        let bytes: Vec<u8> = embedding.iter().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect();
+        serializer.serialize_str(&STANDARD.encode(bytes))
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Vec<f32>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Stored {
+            Compact(String),
+            Numbers(Vec<f32>),
+        }
+        match Stored::deserialize(deserializer)? {
+            Stored::Numbers(numbers) => Ok(numbers),
+            Stored::Compact(text) => {
+                let bytes = STANDARD.decode(text).map_err(serde::de::Error::custom)?;
+                if bytes.len() % 2 != 0 {
+                    return Err(serde::de::Error::custom("an embedding of half a float"));
+                }
+                Ok(bytes.chunks_exact(2).map(|b| half::f16::from_le_bytes([b[0], b[1]]).to_f32()).collect())
+            }
+        }
+    }
 }
 
 /// Every phrase of a track, with a lead-in before the first and a tail after
@@ -72,4 +107,34 @@ pub fn cut(pcm: &Pcm, analysis: &Analysis, encoder: &mut AudioEncoder) -> Result
         });
     }
     Ok(segments)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embeddings_store_small_and_read_back_close_in_either_form() {
+        let embedding: Vec<f32> = (0..512).map(|i| ((i as f32) * 0.37).sin() / 16.0).collect();
+        let segment = Segment {
+            start: 0.0,
+            end: 1.0,
+            loudness: None,
+            brightness: None,
+            onset_rate: None,
+            key: None,
+            embedding: embedding.clone(),
+        };
+        let compact = serde_json::to_string(&segment).unwrap();
+        let mut numbers = serde_json::to_value(&segment).unwrap();
+        numbers["embedding"] = serde_json::json!(embedding);
+        let numbers = numbers.to_string();
+        assert!(compact.len() * 4 < numbers.len(), "{} against {}", compact.len(), numbers.len());
+
+        let back: Segment = serde_json::from_str(&compact).unwrap();
+        let worst = back.embedding.iter().zip(&embedding).map(|(a, b)| (a - b).abs()).fold(0f32, f32::max);
+        assert!(worst < 1e-4, "{worst}");
+        let old: Segment = serde_json::from_str(&numbers).unwrap();
+        assert_eq!(old.embedding, embedding);
+    }
 }

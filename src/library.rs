@@ -1,8 +1,12 @@
 //! The tracks indexed so far: each one's analysis and segments, one JSON file
 //! a track under `$XDG_DATA_HOME/stelly-mix/library`, redone when the file
 //! changes or the analysis does.
+//!
+//! A track from a source is kept by where it came from rather than by its
+//! file, which can go once it is analysed: `Sources::audio` fetches it again.
 
 use crate::segments::{self, Segment};
+use crate::source::Origin;
 use crate::{Analysis, Options};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -25,8 +29,25 @@ pub struct Track {
     /// kept were all indexed in the default one.
     #[serde(default = "default_bpm_range")]
     pub bpm_range: (f64, f64),
+    /// Where it came from when not a file of its own; its `path` is then the
+    /// file it was analysed from, which may be gone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<Origin>,
     pub analysis: Analysis,
     pub segments: Vec<Segment>,
+    /// What tells one recording from another, worked out once when asked.
+    #[serde(skip)]
+    pub fingerprint: std::sync::OnceLock<Fingerprint>,
+}
+
+/// What `transitions::same_recording` compares: a name with track numbers
+/// and punctuation set aside, a length, and how the whole track sounds.
+#[derive(Debug, Clone)]
+pub struct Fingerprint {
+    pub name: String,
+    pub seconds: f64,
+    /// The phrases' embeddings averaged and normalised.
+    pub sound: Vec<f32>,
 }
 
 fn default_bpm_range() -> (f64, f64) {
@@ -40,6 +61,25 @@ impl Track {
 
     pub fn bpm(&self) -> Option<f64> {
         self.analysis.grid.as_ref().map(|g| g.bpm)
+    }
+
+    pub fn fingerprint(&self) -> &Fingerprint {
+        self.fingerprint.get_or_init(|| {
+            let name: String = self.name().to_lowercase().chars().filter(|c| c.is_alphanumeric()).collect();
+            let mut sound = vec![0f32; self.segments.first().map_or(0, |s| s.embedding.len())];
+            for segment in &self.segments {
+                for (m, v) in sound.iter_mut().zip(&segment.embedding) {
+                    *m += v;
+                }
+            }
+            let norm = sound.iter().map(|v| v * v).sum::<f32>().sqrt().max(1e-9);
+            sound.iter_mut().for_each(|v| *v /= norm);
+            Fingerprint {
+                name: name.trim_start_matches(|c: char| c.is_ascii_digit()).to_string(),
+                seconds: self.analysis.seconds,
+                sound,
+            }
+        })
     }
 }
 
@@ -66,45 +106,123 @@ impl Library {
         current(&track).then_some(track)
     }
 
+    /// The entry for a track from a source, by its origin's key.
+    pub fn by_origin(&self, key: &str) -> Option<Track> {
+        let text = std::fs::read_to_string(self.dir.join(entry_name(key.as_bytes()))).ok()?;
+        let track: Track = serde_json::from_str(&text).ok()?;
+        (track.origin.as_ref().is_some_and(|o| o.key() == key) && current(&track)).then_some(track)
+    }
+
+    /// Analyse `file`, fetched from `origin`, into the library, in the
+    /// default octave.
+    pub fn index_origin(&self, file: &Path, origin: Origin) -> Result<Track> {
+        let models = crate::models::dir();
+        crate::models::ensure(&models)?;
+        let mut encoder = AudioEncoder::load(&models, 4)?;
+        let mut track = index(file, &Options::default(), &mut encoder)?;
+        track.origin = Some(origin);
+        self.put(&track)?;
+        Ok(track)
+    }
+
+    /// The entry for `file`, indexing it first if need be, in the default
+    /// octave.
+    pub fn indexed(&self, file: &Path) -> Result<Track> {
+        if let Some(track) = self.get(file) {
+            return Ok(track);
+        }
+        let models = crate::models::dir();
+        crate::models::ensure(&models)?;
+        let mut encoder = AudioEncoder::load(&models, 4)?;
+        let track = index(file, &Options::default(), &mut encoder)?;
+        self.put(&track)?;
+        Ok(track)
+    }
+
     pub fn put(&self, track: &Track) -> Result<()> {
-        let entry = self.entry(&track.path);
-        let partial = entry.with_extension("part");
+        let entry = match &track.origin {
+            Some(origin) => self.dir.join(entry_name(origin.key().as_bytes())),
+            None => self.entry(&track.path),
+        };
+        // Written aside under a name of its own, so two writers, two indexing
+        // runs say, never write into one file, then moved into place whole.
+        static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let partial = entry.with_extension(format!("{}-{n}.part", std::process::id()));
         std::fs::write(&partial, serde_json::to_vec(track)?)?;
         std::fs::rename(&partial, &entry)?;
         Ok(())
     }
 
     /// Every current entry. Ones from an older analysis, or for a file that
-    /// has changed or gone since, are left out, as `get` leaves them.
+    /// has changed or gone since, are left out, as `get` leaves them. Read
+    /// on every core: a large library is tens of thousands of files.
     pub fn all(&self) -> Result<Vec<Track>> {
-        let mut tracks = Vec::new();
-        for entry in std::fs::read_dir(&self.dir)? {
-            let path = entry?.path();
-            if path.extension().is_none_or(|e| e != "json") {
-                continue;
-            }
-            let Ok(text) = std::fs::read_to_string(&path) else { continue };
-            if let Ok(track) = serde_json::from_str::<Track>(&text) {
-                if current(&track) {
-                    tracks.push(track);
-                }
-            }
-        }
+        let paths = self.entries()?;
+        let threads = std::thread::available_parallelism().map_or(4, |n| n.get()).clamp(1, 16);
+        let mut tracks: Vec<Track> = std::thread::scope(|scope| {
+            let handles: Vec<_> = paths
+                .chunks(paths.len().div_ceil(threads).max(1))
+                .map(|chunk| {
+                    scope.spawn(move || {
+                        chunk
+                            .iter()
+                            .filter_map(|path| serde_json::from_slice::<Track>(&std::fs::read(path).ok()?).ok())
+                            .filter(current)
+                            .collect::<Vec<Track>>()
+                    })
+                })
+                .collect();
+            handles.into_iter().flat_map(|h| h.join().expect("a library reader panicked")).collect()
+        });
         tracks.sort_by(|a, b| a.path.cmp(&b.path));
         Ok(tracks)
     }
 
+    /// Rewrite every entry in the current form, embeddings compact: the
+    /// number rewritten.
+    pub fn compact(&self) -> Result<usize> {
+        let mut done = 0;
+        for path in self.entries()? {
+            let Ok(text) = std::fs::read_to_string(&path) else { continue };
+            // Already compact: its embeddings are strings.
+            if !text.contains("\"embedding\":[") {
+                continue;
+            }
+            if let Ok(track) = serde_json::from_str::<Track>(&text) {
+                let partial = path.with_extension("compact.part");
+                std::fs::write(&partial, serde_json::to_vec(&track)?)?;
+                std::fs::rename(&partial, &path)?;
+                done += 1;
+            }
+        }
+        Ok(done)
+    }
+
+    fn entries(&self) -> Result<Vec<PathBuf>> {
+        Ok(std::fs::read_dir(&self.dir)?
+            .filter_map(|e| Some(e.ok()?.path()))
+            .filter(|p| p.extension().is_some_and(|e| e == "json"))
+            .collect())
+    }
+
     fn entry(&self, canonical: &Path) -> PathBuf {
-        let digest = Sha256::digest(canonical.as_os_str().as_encoded_bytes());
-        let name: String = digest[..10].iter().map(|b| format!("{b:02x}")).collect();
-        self.dir.join(format!("{name}.json"))
+        self.dir.join(entry_name(canonical.as_os_str().as_encoded_bytes()))
     }
 }
 
-/// Whether an entry still describes its file: this analysis, and the file
-/// as it was.
+/// An entry's file name: a path's hash for a file, an origin's for a source's track.
+fn entry_name(key: &[u8]) -> String {
+    let digest = Sha256::digest(key);
+    let name: String = digest[..10].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{name}.json")
+}
+
+/// Whether an entry still holds: this analysis, and the file as it was. A
+/// source's track is the source's recording, however its file comes and goes.
 fn current(track: &Track) -> bool {
-    track.version == VERSION && stamp(&track.path).is_ok_and(|stamp| stamp == (track.size, track.modified))
+    track.version == VERSION
+        && (track.origin.is_some() || stamp(&track.path).is_ok_and(|stamp| stamp == (track.size, track.modified)))
 }
 
 /// Decode, analyse and cut one file.
@@ -112,16 +230,34 @@ pub fn index(path: &Path, options: &Options, encoder: &mut AudioEncoder) -> Resu
     let path = path.canonicalize().with_context(|| format!("finding {}", path.display()))?;
     let (size, modified) = stamp(&path)?;
     let pcm = crate::decode::decode_file(&path)?;
-    let analysis = crate::analyse(&pcm, options)?;
-    let segments = segments::cut(&pcm, &analysis, encoder)?;
+    let mut track = index_pcm(&pcm, path, options, encoder)?;
+    (track.size, track.modified) = (size, modified);
+    Ok(track)
+}
+
+/// Analyse and cut audio already decoded, which came from `origin`: a
+/// server's, fetched to memory rather than to a file. Its `path` is what it
+/// is called, a stand-in for a file it never had.
+pub fn index_origin_pcm(pcm: &stelly_audio::decode::Pcm, origin: Origin, options: &Options, encoder: &mut AudioEncoder) -> Result<Track> {
+    let name = PathBuf::from(origin.item.file_stem());
+    let mut track = index_pcm(pcm, name, options, encoder)?;
+    track.origin = Some(origin);
+    Ok(track)
+}
+
+fn index_pcm(pcm: &stelly_audio::decode::Pcm, path: PathBuf, options: &Options, encoder: &mut AudioEncoder) -> Result<Track> {
+    let analysis = crate::analyse(pcm, options)?;
+    let segments = segments::cut(pcm, &analysis, encoder)?;
     Ok(Track {
         path,
-        size,
-        modified,
+        size: 0,
+        modified: 0,
         version: VERSION,
         bpm_range: options.bpm_range,
+        origin: None,
         analysis,
         segments,
+        fingerprint: Default::default(),
     })
 }
 
@@ -162,6 +298,18 @@ mod tests {
         assert!(current(&track));
         std::fs::remove_file(&file).unwrap();
         assert!(!current(&track), "a gone file is stale");
+
+        // A source's track outlives its file, and is found by where it came from.
+        let library = Library::open(dir.join("library")).unwrap();
+        track.origin = Some(Origin {
+            source: "qobuz".into(),
+            item: crate::source::Item { id: "42".into(), artist: "A".into(), title: "T".into(), seconds: None },
+        });
+        assert!(current(&track));
+        library.put(&track).unwrap();
+        assert_eq!(library.by_origin("qobuz:42").map(|t| t.path), Some(file.clone()));
+        assert!(library.by_origin("qobuz:43").is_none());
+        assert_eq!(library.all().unwrap().len(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
 }
