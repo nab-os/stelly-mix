@@ -11,31 +11,19 @@ name = "stelly-mix"
 path = "src/main.rs"
 
 [dependencies]
-# Decoding, the descriptors and CLAP's audio tower, shared with Stelly; every
-# codec on, for local files.
-stelly-audio = { git = "https://github.com/nab-os/stelly-audio", features = ["all-codecs"] }
+# Decoding (Opus and stereo included), the descriptors, CLAP's two towers and
+# fetching their weights, shared with Stelly; every codec on, for local files.
+stelly-audio = { git = "https://github.com/nab-os/stelly-audio", features = ["all-codecs", "text", "fetch"] }
 
 anyhow = "1"
 argh = "0.1.19"
-# Opus, which symphonia demuxes but cannot decode. Pure Rust, bit-exact on
-# the RFC 8251 vectors. opus-decoder is too, but its transforms are plain
-# O(n²) DFTs: 28s for a five-minute track where this takes well under one.
-rusty-opus = "1.0.1"
 realfft = "3.5.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# CLAP's text tower, for finding tracks by description: ONNX Runtime pinned
-# to what stelly-audio runs, and the tokenizer Stelly uses.
-ort = { version = "=2.0.0-rc.13", features = ["download-binaries"] }
-tokenizers = { version = "0.23.2", default-features = false, features = ["onig"] }
 # Loudness for matching levels in renders, stereo, as the ear hears it.
 ebur128 = "0.1.10"
-# Fetching and checking CLAP's weights, once.
+# The library's file names, from the path.
 sha2 = "0.10"
-ureq = "3"
-# Stereo decoding for renders, and demuxing Ogg Opus; the same symphonia
-# stelly-audio decodes with.
-symphonia = { version = "0.6.1", default-features = false, features = ["all-codecs", "all-formats"] }
 # Keylock for renders: Signalsmith Stretch, compiled from C++, which wants a
 # C++ compiler and libclang at build time.
 signalsmith-stretch = "0.1.3"

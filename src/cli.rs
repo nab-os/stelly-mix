@@ -352,8 +352,8 @@ fn mix(args: &Mix, sources: &Sources) -> Result<()> {
                 args.stretch
             )
         })?;
-    let a = crate::decode::decode_stereo(&playing.path)?;
-    let b = crate::decode::decode_stereo(&next.path)?;
+    let a = crate::decode::decode_file_stereo(&playing.path)?;
+    let b = crate::decode::decode_file_stereo(&next.path)?;
     let settings = crate::render::Settings {
         keylock: !args.turntable,
         bass_swap: !args.crossfade,
@@ -449,7 +449,7 @@ fn set(args: &Set, sources: &Sources) -> Result<()> {
         let last_to = chain.last().map_or(0.0, |t| t.analysis.seconds);
         let started = Instant::now();
         let rendered = crate::render::render_chain(&chain, &plan.transitions, 0.0, last_to, &settings, |k| {
-            crate::decode::decode_stereo(&chain[k].path)
+            crate::decode::decode_file_stereo(&chain[k].path)
         })?;
         crate::render::write_wav(&args.out, &rendered.audio)?;
         eprintln!(

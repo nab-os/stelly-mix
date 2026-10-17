@@ -8,7 +8,6 @@
 pub mod bands;
 pub mod beats;
 pub mod cli;
-pub mod decode;
 pub mod eval;
 pub mod grid;
 pub mod key;
@@ -27,6 +26,9 @@ use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use stelly_audio::decode::Pcm;
 use stelly_audio::descriptors;
+
+/// Decoding is stelly-audio's, Opus and stereo included.
+pub use stelly_audio::decode;
 
 pub use grid::Grid;
 pub use key::Key;

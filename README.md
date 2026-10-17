@@ -105,11 +105,9 @@ Building it wants a C++ compiler and libclang, for Signalsmith Stretch.
 
 ## How it works
 
-Decoding and the descriptors (tempo estimate, key, loudness) come from
-`stelly-audio`, the analysis crate shared with Stelly. Everything from beats
-onwards is here, and so is Opus: symphonia demuxes it, `rusty-opus` decodes
-it, pure Rust and sample-for-sample with libopus, pre-skip dropped so beats
-are not 6.5ms late.
+Decoding, Opus included, the descriptors (tempo estimate, key, loudness),
+CLAP's two towers and fetching their weights come from `stelly-audio`, the
+analysis crate shared with Stelly. Everything from beats onwards is here.
 
 - **Tempo**: the onset envelope's strongest autocorrelation peaks are each
   tracked, and the one whose beats sit best on a steady grid wins. The

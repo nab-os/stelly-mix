@@ -1418,14 +1418,18 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "stelly-audio"
 version = "0.1.0"
-source = "git+https://github.com/nab-os/stelly-audio#7f486ffa6805dd9f5bde330a69fe44b4b76bdc01"
+source = "git+https://github.com/nab-os/stelly-audio#5d78dd11cab765cc8e03832bb6bde5265260fa06"
 dependencies = [
  "anyhow",
  "ebur128",
  "ort",
  "realfft",
+ "rusty-opus",
  "serde",
+ "sha2",
  "symphonia",
+ "tokenizers",
+ "ureq",
 ]
 
 [[package]]
@@ -1435,17 +1439,12 @@ dependencies = [
  "anyhow",
  "argh",
  "ebur128",
- "ort",
  "realfft",
- "rusty-opus",
  "serde",
  "serde_json",
  "sha2",
  "signalsmith-stretch",
  "stelly-audio",
- "symphonia",
- "tokenizers",
- "ureq",
 ]
 
 [[package]]
