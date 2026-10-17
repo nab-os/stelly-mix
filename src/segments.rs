@@ -39,8 +39,10 @@ pub fn cut(pcm: &Pcm, analysis: &Analysis, encoder: &mut AudioEncoder) -> Result
     let rate = clap::SAMPLE_RATE as f64;
     let seconds = audio.len() as f64 / rate;
 
+    // The lead-in from the first downbeat, so that it starts on a bar like
+    // every phrase; from the first beat only if there are no downbeats.
     let mut bounds: Vec<f64> = Vec::new();
-    if let Some(&first) = analysis.beats.first() {
+    if let Some(&first) = analysis.downbeats.first().or(analysis.beats.first()) {
         bounds.push(first);
     }
     bounds.extend(analysis.phrases.iter().copied());

@@ -87,6 +87,7 @@ pub fn plan(library: &[Track], first: usize, options: &Options) -> Option<Plan> 
     let ranking = transitions::Options {
         max_stretch: options.max_stretch,
         tempo: Some(master),
+        sound: transitions::SoundScale::of(library),
     };
 
     let mut beam = vec![Plan {

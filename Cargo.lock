@@ -1418,7 +1418,7 @@ checksum = "a2eb9349b6444b326872e140eb1cf5e7c522154d69e7a0ffb0fb81c06b37543f"
 [[package]]
 name = "stelly-audio"
 version = "0.1.0"
-source = "git+https://github.com/nab-os/stelly-audio#5d78dd11cab765cc8e03832bb6bde5265260fa06"
+source = "git+https://github.com/nab-os/stelly-audio#308a5f402d8e647a1ad9fab4af52c723601c7729"
 dependencies = [
  "anyhow",
  "ebur128",

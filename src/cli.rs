@@ -256,7 +256,9 @@ fn index(args: &Index, sources: &Sources) -> Result<()> {
     // What is here and indexed already is passed over. The rest is fetched
     // by the workers, so a playlist is analysed as it comes down rather than
     // after the last of it has.
-    files.retain(|p| p.cached().is_none_or(|f| is_audio(&f) && library.get(&f).is_none()));
+    // Indexed in another octave is not indexed: `--bpm-range` asks again.
+    let in_range = |file: &Path| library.get(file).is_some_and(|t| t.bpm_range == args.bpm_range);
+    files.retain(|p| p.cached().is_none_or(|f| is_audio(&f) && !in_range(&f)));
     files.sort_by_key(|p| match p {
         Pending::File(f) => Some(f.clone()),
         Pending::Item(..) => None,
@@ -291,7 +293,7 @@ fn index(args: &Index, sources: &Sources) -> Result<()> {
                             }
                         };
                         // A fetched file's name is its source's: checked once it is here.
-                        if matches!(pending, Pending::Item(..)) && (!is_audio(&file) || library.get(&file).is_some()) {
+                        if matches!(pending, Pending::Item(..)) && (!is_audio(&file) || in_range(&file)) {
                             continue;
                         }
                         match crate::library::index(&file, &options, &mut encoder) {
@@ -339,6 +341,8 @@ fn mix(args: &Mix, sources: &Sources) -> Result<()> {
     let next = indexed(&library, &sources.file(&args.to)?)?;
     let options = crate::transitions::Options {
         max_stretch: args.stretch / 100.0,
+        // Against the library, so this pair's score means what it would in `next`.
+        sound: crate::transitions::SoundScale::of(&library.all()?),
         ..Default::default()
     };
     let transition = crate::transitions::from(&playing, std::slice::from_ref(&next), &options)
@@ -493,6 +497,7 @@ fn next(args: &Next, sources: &Sources) -> Result<()> {
     let others = library.all()?;
     let options = crate::transitions::Options {
         max_stretch: args.stretch / 100.0,
+        sound: crate::transitions::SoundScale::of(&others),
         ..Default::default()
     };
     let transitions = crate::transitions::from(&playing, &others, &options);
@@ -537,18 +542,31 @@ struct Scored {
 }
 
 fn evaluate(args: &Eval) -> Result<()> {
-    let mut audio = HashMap::new();
+    // Every audio file under each name: two folders can each have one.
+    let mut audio: HashMap<String, Vec<PathBuf>> = HashMap::new();
     walk(&args.audio, &mut |path| {
         if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-            audio.insert(stem.to_string(), path.to_path_buf());
+            audio.entry(stem.to_string()).or_default().push(path.to_path_buf());
         }
     })?;
     let mut pairs = Vec::new();
     walk(&args.annotations, &mut |path| {
         if path.extension().is_some_and(|e| e == "beats") {
             let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or_default();
-            if let Some(file) = audio.get(stem) {
-                pairs.push((path.to_path_buf(), file.clone()));
+            match audio.get(stem).map(Vec::as_slice) {
+                None | Some([]) => {}
+                Some([file]) => pairs.push((path.to_path_buf(), file.clone())),
+                // Several by that name: the one in the same folder under the
+                // audio as the annotation is under the annotations.
+                Some(files) => {
+                    let folder = |p: &Path, root: &Path| p.parent().and_then(|d| d.strip_prefix(root).ok()).map(Path::to_path_buf);
+                    let wanted = folder(path, &args.annotations);
+                    let same: Vec<&PathBuf> = files.iter().filter(|f| folder(f, &args.audio) == wanted).collect();
+                    match same.as_slice() {
+                        [file] => pairs.push((path.to_path_buf(), (*file).clone())),
+                        _ => eprintln!("{}: {} audio files are called {stem}; skipped", path.display(), files.len()),
+                    }
+                }
             }
         }
     })?;

@@ -21,8 +21,16 @@ pub struct Track {
     /// Seconds since the epoch.
     pub modified: u64,
     pub version: u32,
+    /// The octave its tempo was reported in; entries from before this was
+    /// kept were all indexed in the default one.
+    #[serde(default = "default_bpm_range")]
+    pub bpm_range: (f64, f64),
     pub analysis: Analysis,
     pub segments: Vec<Segment>,
+}
+
+fn default_bpm_range() -> (f64, f64) {
+    crate::tempo::DJ_BPM
 }
 
 impl Track {
@@ -50,13 +58,12 @@ impl Library {
     }
 
     /// The stored entry for `path`, if there is one and the file has not
-    /// changed since.
+    /// changed since, whatever octave it was indexed in.
     pub fn get(&self, path: &Path) -> Option<Track> {
         let path = path.canonicalize().ok()?;
         let text = std::fs::read_to_string(self.entry(&path)).ok()?;
         let track: Track = serde_json::from_str(&text).ok()?;
-        let (size, modified) = stamp(&path).ok()?;
-        (track.version == VERSION && track.size == size && track.modified == modified).then_some(track)
+        current(&track).then_some(track)
     }
 
     pub fn put(&self, track: &Track) -> Result<()> {
@@ -67,7 +74,8 @@ impl Library {
         Ok(())
     }
 
-    /// Every current entry. Ones from an older analysis are left out.
+    /// Every current entry. Ones from an older analysis, or for a file that
+    /// has changed or gone since, are left out, as `get` leaves them.
     pub fn all(&self) -> Result<Vec<Track>> {
         let mut tracks = Vec::new();
         for entry in std::fs::read_dir(&self.dir)? {
@@ -77,7 +85,7 @@ impl Library {
             }
             let Ok(text) = std::fs::read_to_string(&path) else { continue };
             if let Ok(track) = serde_json::from_str::<Track>(&text) {
-                if track.version == VERSION && track.path.exists() {
+                if current(&track) {
                     tracks.push(track);
                 }
             }
@@ -93,6 +101,12 @@ impl Library {
     }
 }
 
+/// Whether an entry still describes its file: this analysis, and the file
+/// as it was.
+fn current(track: &Track) -> bool {
+    track.version == VERSION && stamp(&track.path).is_ok_and(|stamp| stamp == (track.size, track.modified))
+}
+
 /// Decode, analyse and cut one file.
 pub fn index(path: &Path, options: &Options, encoder: &mut AudioEncoder) -> Result<Track> {
     let path = path.canonicalize().with_context(|| format!("finding {}", path.display()))?;
@@ -105,6 +119,7 @@ pub fn index(path: &Path, options: &Options, encoder: &mut AudioEncoder) -> Resu
         size,
         modified,
         version: VERSION,
+        bpm_range: options.bpm_range,
         analysis,
         segments,
     })
@@ -114,4 +129,39 @@ fn stamp(path: &Path) -> Result<(u64, u64)> {
     let meta = std::fs::metadata(path)?;
     let modified = meta.modified()?.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs());
     Ok((meta.len(), modified))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_file_changed_since_is_not_current() {
+        let dir = std::env::temp_dir().join(format!("stelly-mix-library-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("track.flac");
+        std::fs::write(&file, b"before").unwrap();
+        let (size, modified) = stamp(&file).unwrap();
+        let mut track: Track = serde_json::from_value(serde_json::json!({
+            "path": file, "size": size, "modified": modified, "version": VERSION,
+            "analysis": {
+                "seconds": 1.0, "grid": null, "key": null, "loudness": null, "beats": [],
+                "downbeats": [], "downbeat_confidence": 0.0, "phrases": [], "sections": []
+            },
+            "segments": []
+        }))
+        .unwrap();
+        // An entry from before the range was kept was indexed in the default one.
+        assert_eq!(track.bpm_range, crate::tempo::DJ_BPM);
+        assert!(current(&track));
+
+        std::fs::write(&file, b"after, and longer").unwrap();
+        assert!(!current(&track), "a changed file is stale");
+        track.size = std::fs::metadata(&file).unwrap().len();
+        track.modified = stamp(&file).unwrap().1;
+        assert!(current(&track));
+        std::fs::remove_file(&file).unwrap();
+        assert!(!current(&track), "a gone file is stale");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
 }

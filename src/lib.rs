@@ -69,6 +69,11 @@ impl Default for Options {
 
 /// Everything, from a decoded track.
 pub fn analyse(pcm: &Pcm, options: &Options) -> Result<Analysis> {
+    let (low, high) = options.bpm_range;
+    anyhow::ensure!(
+        low > 0.0 && low.is_finite() && high >= 2.0 * low && high.is_finite(),
+        "a tempo range must be positive and span an octave, not {low}-{high}"
+    );
     let described = descriptors::extract(&pcm.samples, pcm.rate)?;
     let onsets = descriptors::onsets(&pcm.samples, pcm.rate);
     let tempo::Choice { beats, grid, .. } =
