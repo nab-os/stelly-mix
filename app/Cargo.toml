@@ -1,6 +1,6 @@
 [package]
 name = "stelly-mix-app"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "stelly-mix in a window: the library, a track's beats and phrases, where to go next, and sets"
 license = "MIT OR Apache-2.0"

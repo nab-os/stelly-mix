@@ -115,6 +115,19 @@ cargo run --release -- sync      # mirror what it has analysed into the library
 cargo run --release -- next qobuz:<track id>
 ```
 
+To have it analyse more, with a device of `admin` scope:
+
+```sh
+cargo run --release -- server-analyse "album/<id>"          # or artist/<id>, track/<id>, playlist/<id>
+cargo run --release -- server-analyse favourites            # the family's liked tracks and albums
+cargo run --release -- server-analyse "mood/dark rolling techno?n=200"
+cargo run --release -- server-analyse "artist-name/Lun?n=30" # its tracks and their nearest
+cargo run --release -- server-analyse "around/<id>?n=50"     # or genre/<genres>?n=<limit>
+```
+
+It follows the server's progress, then syncs. The app's Index box takes the
+same, written `stelly:album/<id>` and so on.
+
 `sync` brings its entries in as `qobuz:<id>` tracks, and the server is then a
 `qobuz` source: their audio comes from its signed URLs when a track is played,
 mixed or rendered, into the same capped cache as any source's. The app syncs

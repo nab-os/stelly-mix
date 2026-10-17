@@ -10,7 +10,7 @@
 //! It wants `STELLY_SERVER` and `STELLY_TOKEN`, from the environment or
 //! `~/.config/stelly-mix/stelly.env`.
 
-use crate::api::{EntriesRequest, Entry, Status, TrackSummary};
+use crate::api::{EntriesRequest, Entry, JobStatus, Selection, Stats, Status, TrackSummary};
 use crate::library::Library;
 use crate::source::{Item, Source};
 use anyhow::{bail, Context, Result};
@@ -107,6 +107,41 @@ impl Stelly {
             report(done, missing.len());
         }
         Ok(done)
+    }
+
+    /// Have the server analyse `selection` for mixing, in the background.
+    /// Wants a device with `admin` scope: it is hours of downloading and CPU.
+    pub fn analyse(&self, selection: &Selection) -> Result<JobStatus> {
+        self.post("/api/mix/analyse", selection).map_err(|err| {
+            if format!("{err:#}").contains("403") {
+                err.context("asking a server to analyse wants a device with admin scope: stelly-server pair --scope admin")
+            } else {
+                err
+            }
+        })
+    }
+
+    pub fn analysis(&self) -> Result<JobStatus> {
+        self.get("/api/mix/analyse", &[])
+    }
+
+    /// `analyse`, then follow it to the end, telling `report` each new line.
+    pub fn analyse_and_wait(&self, selection: &Selection, report: &dyn Fn(&str)) -> Result<Stats> {
+        self.analyse(selection)?;
+        let mut last = None;
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+            let status = self.analysis()?;
+            if status.last != last {
+                if let Some(line) = &status.last {
+                    report(line);
+                }
+                last = status.last.clone();
+            }
+            if !status.running {
+                return status.stats.with_context(|| status.last.unwrap_or_else(|| "the analysis stopped".into()));
+            }
+        }
     }
 
     /// The track's audio in `format_id` into `cache`, unless some is there.

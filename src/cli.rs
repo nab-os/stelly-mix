@@ -34,6 +34,19 @@ enum Command {
     Eval(Eval),
     Compact(Compact),
     Sync(Sync),
+    ServerAnalyse(ServerAnalyse),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "server-analyse")]
+/// Have Stelly's server analyse tracks for mixing, then sync them in. Takes
+/// track/<id>, album/<id>, artist/<id>, playlist/<id>, favourites,
+/// around/<id>, artist-name/<name>, mood/<words> or genre/<genres>, the last
+/// four with ?n=<count>. Wants an admin device's token.
+struct ServerAnalyse {
+    /// what to analyse, e.g. "artist-name/Lun?n=30"
+    #[argh(positional)]
+    selection: String,
 }
 
 #[derive(FromArgs)]
@@ -227,6 +240,16 @@ pub fn run(sources: Vec<Box<dyn Source>>) -> Result<()> {
         Command::Find(args) => find(&args)?,
         Command::Search(args) => search(&args, &sources)?,
         Command::Eval(args) => evaluate(&args)?,
+        Command::ServerAnalyse(args) => {
+            let selection: crate::api::Selection = args.selection.parse().map_err(anyhow::Error::msg)?;
+            let stelly = crate::stelly::Stelly::from_env().context("set STELLY_SERVER and STELLY_TOKEN to ask Stelly's server")?;
+            eprintln!("asking for {selection}");
+            let stats = stelly.analyse_and_wait(&selection, &|line| eprintln!("{line}"))?;
+            eprintln!("{} analysed, {} failed, of {}", stats.done, stats.failed, stats.total);
+            let library = Library::open(Library::default_dir())?;
+            let brought = stelly.sync(&library, &|_, _| {})?;
+            eprintln!("brought {brought} into the library");
+        }
         Command::Sync(_) => {
             let stelly = crate::stelly::Stelly::from_env().context("set STELLY_SERVER and STELLY_TOKEN to sync from Stelly's server")?;
             let library = Library::open(Library::default_dir())?;

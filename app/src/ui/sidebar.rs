@@ -71,7 +71,7 @@ pub fn Sidebar() -> Element {
                 div { class: "row-flex",
                     input {
                         class: "spacer",
-                        placeholder: "File, folder or source:reference",
+                        placeholder: "Folder, file, or stelly:album/<id>, mood/<words>…",
                         value: "{adding}",
                         oninput: move |e| adding.set(e.value()),
                         onkeydown: move |e| {
@@ -163,8 +163,14 @@ fn Status() -> Element {
 }
 
 /// Index `argument` on the blocking pool, saying how it goes, then read the
-/// library again.
+/// library again: a `stelly:` selection on Stelly's server, then synced in;
+/// anything else here.
 fn start_indexing(state: State, argument: String) {
+    if argument.starts_with("stelly:") {
+        if let Some(stelly) = work::stelly() {
+            return start_server_analysis(state, stelly, argument);
+        }
+    }
     let mut busy = state.busy;
     busy.set(Some(format!("Indexing {argument}…")));
     let (tell, mut heard) = tokio::sync::mpsc::unbounded_channel::<String>();
@@ -192,6 +198,38 @@ fn start_indexing(state: State, argument: String) {
         busy.set(None);
         match done {
             Ok(0) => state.fail(anyhow::anyhow!("nothing new to index in {shown}")),
+            Ok(_) => state.reload(),
+            Err(err) => state.fail(err),
+        }
+    });
+}
+
+/// Have Stelly's server analyse `argument`, following it in the status line,
+/// then bring what it made into the library.
+fn start_server_analysis(state: State, stelly: &'static stelly_mix::stelly::Stelly, argument: String) {
+    let mut busy = state.busy;
+    let selection: stelly_mix::api::Selection = match argument.parse() {
+        Ok(selection) => selection,
+        Err(err) => return state.fail(anyhow::anyhow!(err)),
+    };
+    busy.set(Some(format!("Asking Stelly's server for {selection}…")));
+    let (tell, mut heard) = tokio::sync::mpsc::unbounded_channel::<String>();
+    spawn(async move {
+        while let Some(line) = heard.recv().await {
+            busy.set(Some(line));
+        }
+    });
+    spawn(async move {
+        let done = work::blocking(move || {
+            let stats = stelly.analyse_and_wait(&selection, &|line| {
+                let _ = tell.send(format!("Server: {line}"));
+            })?;
+            let _ = tell.send(format!("Server analysed {} ({} failed); bringing them in…", stats.done, stats.failed));
+            stelly.sync(&work::library()?, &|_, _| {})
+        })
+        .await;
+        busy.set(None);
+        match done {
             Ok(_) => state.reload(),
             Err(err) => state.fail(err),
         }

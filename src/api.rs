@@ -167,3 +167,142 @@ pub struct Entry {
 pub struct EntriesRequest {
     pub ids: Vec<i64>,
 }
+
+/// What to have a server analyse for mixing. On the command line and in the
+/// app's Index box it is written as a reference, see `FromStr`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "pick", rename_all = "kebab-case")]
+pub enum Selection {
+    /// One track, its album catalogued with it.
+    Track { id: i64 },
+    Album { id: String },
+    /// The artist's own releases.
+    Artist { id: i64 },
+    /// A Qobuz playlist's tracks.
+    Playlist { id: i64 },
+    /// What the family has liked: tracks, and albums whole.
+    Favourites,
+    /// A track and its nearest `count` in the server's space.
+    Around { seed: i64, count: usize },
+    /// Every track in the space credited to `name`, and the nearest `count`
+    /// of each.
+    ArtistName { name: String, count: usize },
+    /// The `count` tracks in the space nearest a description.
+    Mood { phrase: String, count: usize },
+    /// The space's tracks whose genre holds any of `genres`, at most `limit`,
+    /// 0 for all.
+    Space { genres: Vec<String>, limit: usize },
+}
+
+/// How many nearest to each, unless a reference says `?n=`.
+pub const AROUND: usize = 20;
+/// How many for a mood, unless `?n=`.
+pub const MOOD: usize = 100;
+
+impl std::str::FromStr for Selection {
+    type Err = String;
+
+    /// `track/<id>`, `album/<id>`, `artist/<id>`, `playlist/<id>`,
+    /// `favourites`, `around/<id>`, `artist-name/<name>`, `mood/<words>` and
+    /// `genre/<genre>,<genre>`, the last four with an optional `?n=<count>`;
+    /// with or without a leading `stelly:`.
+    fn from_str(reference: &str) -> Result<Self, String> {
+        let reference = reference.trim();
+        let reference = reference.strip_prefix("stelly:").unwrap_or(reference);
+        let (what, count) = match reference.rsplit_once("?n=") {
+            Some((what, n)) => (what, Some(n.parse::<usize>().map_err(|_| format!("?n={n} is not a count"))?)),
+            None => (reference, None),
+        };
+        let id = |text: &str| text.trim().parse::<i64>().map_err(|_| format!("{text:?} is not an id"));
+        let text = |text: &str| {
+            let text = text.trim();
+            if text.is_empty() { Err(format!("{reference}: what after the slash?")) } else { Ok(text.to_string()) }
+        };
+        Ok(match what.split_once('/') {
+            None if what == "favourites" || what == "favorites" => Selection::Favourites,
+            Some(("track", rest)) => Selection::Track { id: id(rest)? },
+            Some(("album", rest)) => Selection::Album { id: text(rest)? },
+            Some(("artist", rest)) => Selection::Artist { id: id(rest)? },
+            Some(("playlist", rest)) => Selection::Playlist { id: id(rest)? },
+            Some(("around", rest)) => Selection::Around { seed: id(rest)?, count: count.unwrap_or(AROUND) },
+            Some(("artist-name", rest)) => Selection::ArtistName { name: text(rest)?, count: count.unwrap_or(AROUND) },
+            Some(("mood", rest)) => Selection::Mood { phrase: text(rest)?, count: count.unwrap_or(MOOD) },
+            Some(("genre", rest)) => Selection::Space {
+                genres: rest.split(',').map(|g| g.trim().to_string()).filter(|g| !g.is_empty()).collect(),
+                limit: count.unwrap_or(0),
+            },
+            _ => {
+                return Err(format!(
+                    "{reference}: expected track/<id>, album/<id>, artist/<id>, playlist/<id>, favourites, \
+                     around/<id>, artist-name/<name>, mood/<words> or genre/<genres>"
+                ))
+            }
+        })
+    }
+}
+
+impl std::fmt::Display for Selection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Selection::Track { id } => write!(f, "track {id}"),
+            Selection::Album { id } => write!(f, "album {id}"),
+            Selection::Artist { id } => write!(f, "artist {id}"),
+            Selection::Playlist { id } => write!(f, "playlist {id}"),
+            Selection::Favourites => write!(f, "the family's likes"),
+            Selection::Around { seed, count } => write!(f, "track {seed} and its {count} nearest"),
+            Selection::ArtistName { name, count } => write!(f, "{name}'s tracks and their {count} nearest"),
+            Selection::Mood { phrase, count } => write!(f, "the {count} tracks nearest \"{phrase}\""),
+            Selection::Space { genres, limit: 0 } => write!(f, "the space's {}", genres.join(", ")),
+            Selection::Space { genres, limit } => write!(f, "the space's {} (at most {limit})", genres.join(", ")),
+        }
+    }
+}
+
+/// How an analysis went.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Stats {
+    pub total: usize,
+    pub done: usize,
+    pub failed: usize,
+}
+
+/// What a server's background analysis is doing.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct JobStatus {
+    pub running: bool,
+    pub selection: Option<String>,
+    /// Its last line: a track done, or why it stopped.
+    pub last: Option<String>,
+    /// How the last run went, once it has.
+    pub stats: Option<Stats>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn references_read_as_selections() {
+        let read = |r: &str| r.parse::<Selection>();
+        assert_eq!(read("stelly:album/0060254728690"), Ok(Selection::Album { id: "0060254728690".into() }));
+        assert_eq!(read("track/42"), Ok(Selection::Track { id: 42 }));
+        assert_eq!(read("playlist/7"), Ok(Selection::Playlist { id: 7 }));
+        assert_eq!(read("favourites"), Ok(Selection::Favourites));
+        assert_eq!(read("around/42?n=50"), Ok(Selection::Around { seed: 42, count: 50 }));
+        assert_eq!(read("artist-name/Lun"), Ok(Selection::ArtistName { name: "Lun".into(), count: AROUND }));
+        assert_eq!(read("mood/dark rolling techno?n=30"), Ok(Selection::Mood { phrase: "dark rolling techno".into(), count: 30 }));
+        assert_eq!(read("genre/techno, house?n=500"), Ok(Selection::Space { genres: vec!["techno".into(), "house".into()], limit: 500 }));
+        for bad in ["album/", "track/x", "around/1?n=many", "everything", "mood/"] {
+            assert!(read(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn selections_cross_the_wire_by_name() {
+        let json = serde_json::to_value(Selection::Around { seed: 42, count: 20 }).unwrap();
+        assert_eq!(json, serde_json::json!({ "pick": "around", "seed": 42, "count": 20 }));
+        assert_eq!(serde_json::to_value(Selection::Favourites).unwrap(), serde_json::json!({ "pick": "favourites" }));
+        let back: Selection = serde_json::from_value(serde_json::json!({ "pick": "artist-name", "name": "Lun", "count": 5 })).unwrap();
+        assert_eq!(back, Selection::ArtistName { name: "Lun".into(), count: 5 });
+    }
+}
