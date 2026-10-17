@@ -362,7 +362,7 @@ fn mix(args: &Mix, sources: &Sources) -> Result<()> {
         keylock: !args.turntable,
         bass_swap: !args.crossfade,
     };
-    let rendered = crate::render::render(&playing, &a, &next, &b, &transition, args.lead, &settings)?;
+    let rendered = crate::render::render(&playing, a, &next, b, &transition, args.lead, &settings)?;
     let cue = &rendered.cues[0];
     let (fade_from, fade_to) = cue.transition.unwrap_or_default();
     crate::render::write_wav(&args.out, &rendered.audio)?;

@@ -16,6 +16,10 @@
 //! Every track is brought to the quietest one's loudness, and the whole
 //! render sits 3 dB under that, so a transition, where two play, has room; a
 //! limiter catches what peaks remain.
+//!
+//! Each track is decoded once and mixed in as it comes, at a gain to a common
+//! reference, and the whole is brought to the target at the end: the same
+//! sum, with one track held at a time.
 
 use crate::decode::Stereo;
 use crate::library::Track;
@@ -41,6 +45,12 @@ const HEADROOM_DB: f64 = 3.0;
 const CEILING: f32 = 0.891;
 const LOOKAHEAD: f64 = 0.005;
 const RELEASE: f64 = 0.1;
+/// What a track that cannot be measured at all, near silence, is taken to
+/// be, LUFS: a master's usual level, so it is not boosted.
+const UNMEASURED_LUFS: f64 = -9.0;
+/// The largest resampling ratio's terms: with no more phases than this, the
+/// resampler reads its taps from a table rather than computing each one.
+const MAX_PHASES: u64 = 4096;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
@@ -75,9 +85,9 @@ pub struct Rendered {
 /// One transition, with `lead` seconds either side.
 pub fn render(
     playing: &Track,
-    a: &Stereo,
+    a: Stereo,
     next: &Track,
-    b: &Stereo,
+    b: Stereo,
     transition: &Transition,
     lead: f64,
     settings: &Settings,
@@ -87,21 +97,21 @@ pub fn render(
     // The incoming track runs `ratio` slower here, so its lead after the
     // transition is `lead / ratio` of its own seconds.
     let last_end = into.end + lead / transition.ratio;
-    let audio = [a, b];
+    let mut audio = [Some(a), Some(b)];
     render_chain(
         &[playing, next],
         std::slice::from_ref(transition),
         (out.start - lead).max(0.0),
         last_end,
         settings,
-        |i| Ok(audio[i].clone()),
+        |i| audio[i].take().context("a track is loaded once"),
     )
 }
 
 /// A chain of tracks, each mixed into the next by its transition. The first
 /// is heard from `first_from` of its own seconds, the last up to `last_to`.
-/// `load` decodes track `i` of the chain; it is called twice a track, once to
-/// measure them all and once to mix, so that only one is held at a time.
+/// `load` decodes track `i` of the chain; it is called once a track, in order,
+/// and only one is held at a time.
 pub fn render_chain(
     tracks: &[&Track],
     transitions: &[Transition],
@@ -142,19 +152,24 @@ pub fn render_chain(
         .collect();
 
     // Levels: every track to the quietest one's body loudness, less headroom.
-    let mut levels = Vec::with_capacity(n);
-    for (k, track) in tracks.iter().enumerate() {
-        levels.push(body_loudness(&load(k)?, track));
-    }
-    let target = levels.iter().flatten().copied().fold(f64::INFINITY, f64::min) - HEADROOM_DB;
-    let rate = load(0)?.rate;
-    let sample = |seconds: f64| (seconds * rate as f64).round().max(0.0) as usize;
-    let total = sample(leaves[n - 1]);
-    let (mut left, mut right) = (vec![0f32; total], vec![0f32; total]);
-
+    // Each goes in at 0 dB against its own level, and the target is applied
+    // once all are in and the quietest is known.
+    let mut quietest = f64::INFINITY;
+    let (mut left, mut right, mut rate, mut total) = (Vec::new(), Vec::new(), 0u32, 0usize);
     for k in 0..n {
         let audio = load(k)?;
-        let gain = levels[k].map_or(1.0, |l| db(target - l));
+        if k == 0 {
+            // The first track's rate is the render's.
+            rate = audio.rate;
+            total = (leaves[n - 1] * rate as f64).round().max(0.0) as usize;
+            (left, right) = (vec![0f32; total], vec![0f32; total]);
+        }
+        let sample = |seconds: f64| (seconds * rate as f64).round().max(0.0) as usize;
+        let measured = body_loudness(&audio, tracks[k]).or_else(|| loudness(&audio, 0, audio.len()));
+        if let Some(level) = measured {
+            quietest = quietest.min(level);
+        }
+        let gain = db(-measured.unwrap_or(UNMEASURED_LUFS));
         let (from, to) = (sample(enters[k]), sample(leaves[k]).min(total));
         if to <= from {
             continue;
@@ -187,6 +202,11 @@ pub fn render_chain(
             }
         }
     }
+    let target = if quietest.is_finite() { quietest } else { UNMEASURED_LUFS } - HEADROOM_DB;
+    let to_target = db(target);
+    for v in left.iter_mut().chain(right.iter_mut()) {
+        *v *= to_target;
+    }
     limit(&mut left, &mut right, rate);
 
     let cues = (0..n)
@@ -205,6 +225,16 @@ pub fn render_chain(
 /// (bass, rest) gains of the outgoing and incoming tracks at sample `t` of a
 /// transition from `from` to `to`, a bass swap at `swap` or a crossfade.
 fn blend(t: isize, from: isize, to: isize, swap: isize, rate: u32, bass_swap: bool) -> ((f64, f64), (f64, f64)) {
+    // Before the transition and after it nothing moves: no trigonometry for
+    // the minutes either side of it.
+    let ramp = if bass_swap { (SWAP_SECONDS * rate as f64) as isize } else { 0 };
+    let (first, last) = if bass_swap { (from.min(swap - ramp), to.max(swap)) } else { (from, to) };
+    if t <= first {
+        return ((1.0, 1.0), (0.0, 0.0));
+    }
+    if t >= last {
+        return ((0.0, 0.0), (1.0, 1.0));
+    }
     if bass_swap {
         swap_gains(t, from, to, swap, rate)
     } else {
@@ -282,13 +312,18 @@ fn body_loudness(audio: &Stereo, track: &Track) -> Option<f64> {
         .filter_map(|segment| {
             let from = ((segment.start * rate) as usize).min(audio.len());
             let to = ((segment.end * rate) as usize).min(audio.len());
-            let mut meter = ebur128::EbuR128::new(2, audio.rate, ebur128::Mode::I).ok()?;
-            meter.add_frames_planar_f32(&[&audio.left[from..to], &audio.right[from..to]]).ok()?;
-            meter.loudness_global().ok().filter(|l| l.is_finite())
+            loudness(audio, from, to)
         })
         .collect();
     phrases.sort_by(f64::total_cmp);
     phrases.get((phrases.len() * 4 / 5).min(phrases.len().saturating_sub(1))).copied()
+}
+
+/// Integrated stereo loudness of `audio[from..to]`, LUFS; none for silence.
+fn loudness(audio: &Stereo, from: usize, to: usize) -> Option<f64> {
+    let mut meter = ebur128::EbuR128::new(2, audio.rate, ebur128::Mode::I).ok()?;
+    meter.add_frames_planar_f32(&[&audio.left[from..to], &audio.right[from..to]]).ok()?;
+    meter.loudness_global().ok().filter(|l| l.is_finite())
 }
 
 /// A level change in dB as a gain.
@@ -303,10 +338,13 @@ fn progress(t: isize, from: isize, to: isize) -> f64 {
 
 /// `len` samples of each channel of `b` from `from` seconds into it, at
 /// `rate`, slowed or sped so one second lasts `ratio`, and with `keylock` at
-/// its own pitch. Only what is needed is resampled: a whole track at an odd
-/// ratio takes the slow path through the resampler.
+/// its own pitch. Only what is needed is resampled.
 fn stretch(b: &Stereo, rate: u32, ratio: f64, keylock: bool, from: f64, len: usize) -> (Vec<f32>, Vec<f32>) {
-    let stretched_rate = (rate as f64 * ratio).round() as u32;
+    // Samples out per sample in, as a fraction with few enough phases for the
+    // resampler's table: an arbitrary rate like 44100 x 1.0225 would share no
+    // short period with the source's, and every tap be computed afresh. Off by
+    // well under a millisecond over a whole track.
+    let (up, down) = fraction(rate as f64 * ratio / b.rate as f64, MAX_PHASES);
     // Half a second either side, for the resampler's and the pitch shifter's
     // edges to settle, cut off after.
     let margin = (b.rate / 2) as usize;
@@ -314,8 +352,10 @@ fn stretch(b: &Stereo, rate: u32, ratio: f64, keylock: bool, from: f64, len: usi
     let lo = at.saturating_sub(margin);
     let hi = (at + (len as f64 / ratio * b.rate as f64 / rate as f64) as usize + margin).min(b.len());
     // Where `from` lands once resampled.
-    let lead = ((at - lo) as f64 * stretched_rate as f64 / b.rate as f64).round() as usize;
-    let source = |channel: &[f32]| resample(channel.get(lo..hi.max(lo)).unwrap_or_default(), b.rate, stretched_rate);
+    let lead = ((at - lo) as f64 * up as f64 / down as f64).round() as usize;
+    // The resampler goes by the two rates' ratio alone, so the fraction's
+    // terms stand in for them.
+    let source = |channel: &[f32]| resample(channel.get(lo..hi.max(lo)).unwrap_or_default(), down as u32, up as u32);
     let (left, right) = (source(&b.left), source(&b.right));
     let (left, right) = if keylock && (ratio - 1.0).abs() > 1e-4 {
         transpose(&left, &right, rate, ratio)
@@ -324,6 +364,37 @@ fn stretch(b: &Stereo, rate: u32, ratio: f64, keylock: bool, from: f64, len: usi
     };
     let cut = |channel: Vec<f32>| channel.into_iter().skip(lead).take(len).collect();
     (cut(left), cut(right))
+}
+
+/// The fraction nearest `x` with neither term over `max`: the continued
+/// fraction's convergents, then the best semiconvergent past the last.
+fn fraction(x: f64, max: u64) -> (u64, u64) {
+    let (mut p0, mut q0, mut p1, mut q1) = (0u64, 1u64, 1u64, 0u64);
+    let mut rest = x;
+    loop {
+        let whole = rest.floor();
+        let a = whole as u64;
+        let (p2, q2) = (a * p1 + p0, a * q1 + q0);
+        if p2 > max || q2 > max {
+            // The largest step towards the next convergent that fits, if it
+            // comes nearer than the last convergent did.
+            if p1 > 0 && q1 > 0 {
+                let k = ((max - p0) / p1).min((max - q0) / q1).min(a);
+                let (ps, qs) = (k * p1 + p0, k * q1 + q0);
+                if k > 0 && (ps as f64 / qs as f64 - x).abs() < (p1 as f64 / q1 as f64 - x).abs() {
+                    return (ps, qs);
+                }
+            }
+            break;
+        }
+        (p0, q0, p1, q1) = (p1, q1, p2, q2);
+        let frac = rest - whole;
+        if frac < 1e-12 {
+            break;
+        }
+        rest = 1.0 / frac;
+    }
+    (p1.max(1), q1.max(1))
 }
 
 /// Pitch times `factor`, length unchanged.
@@ -359,30 +430,38 @@ fn lowpass(input: &[f32], rate: u32) -> Vec<f32> {
     section(&once).into_iter().map(|v| v as f32).collect()
 }
 
-/// 16-bit stereo WAV.
+/// 16-bit stereo WAV, written as it goes rather than built in memory first.
 pub fn write_wav(path: &Path, audio: &Stereo) -> Result<()> {
-    let data = (audio.len() * 4) as u32;
-    let mut out = Vec::with_capacity(44 + data as usize);
-    out.extend_from_slice(b"RIFF");
-    out.extend_from_slice(&(36 + data).to_le_bytes());
-    out.extend_from_slice(b"WAVEfmt ");
-    out.extend_from_slice(&16u32.to_le_bytes());
-    out.extend_from_slice(&1u16.to_le_bytes()); // PCM
-    out.extend_from_slice(&2u16.to_le_bytes()); // stereo
-    out.extend_from_slice(&audio.rate.to_le_bytes());
-    out.extend_from_slice(&(audio.rate * 4).to_le_bytes());
-    out.extend_from_slice(&4u16.to_le_bytes());
-    out.extend_from_slice(&16u16.to_le_bytes());
-    out.extend_from_slice(b"data");
-    out.extend_from_slice(&data.to_le_bytes());
-    for (l, r) in audio.left.iter().zip(&audio.right) {
-        for v in [l, r] {
-            out.extend_from_slice(&((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes());
+    // A WAV's sizes are 32-bit: past that it cannot say how long it is.
+    let data = u32::try_from(audio.len() as u64 * 4)
+        .ok()
+        .filter(|d| *d <= u32::MAX - 36)
+        .with_context(|| {
+            let hours = (u32::MAX - 36) as f64 / 4.0 / audio.rate as f64 / 3600.0;
+            format!("{} would be over a WAV's 4 GiB; at {} Hz it holds {hours:.1} hours", path.display(), audio.rate)
+        })?;
+    let write = || -> std::io::Result<()> {
+        let mut out = std::io::BufWriter::new(std::fs::File::create(path)?);
+        out.write_all(b"RIFF")?;
+        out.write_all(&(36 + data).to_le_bytes())?;
+        out.write_all(b"WAVEfmt ")?;
+        out.write_all(&16u32.to_le_bytes())?;
+        out.write_all(&1u16.to_le_bytes())?; // PCM
+        out.write_all(&2u16.to_le_bytes())?; // stereo
+        out.write_all(&audio.rate.to_le_bytes())?;
+        out.write_all(&(audio.rate * 4).to_le_bytes())?;
+        out.write_all(&4u16.to_le_bytes())?;
+        out.write_all(&16u16.to_le_bytes())?;
+        out.write_all(b"data")?;
+        out.write_all(&data.to_le_bytes())?;
+        for (l, r) in audio.left.iter().zip(&audio.right) {
+            for v in [l, r] {
+                out.write_all(&((v.clamp(-1.0, 1.0) * 32767.0) as i16).to_le_bytes())?;
+            }
         }
-    }
-    std::fs::File::create(path)
-        .and_then(|mut f| f.write_all(&out))
-        .with_context(|| format!("writing {}", path.display()))
+        out.flush()
+    };
+    write().with_context(|| format!("writing {}", path.display()))
 }
 
 #[cfg(test)]
@@ -445,6 +524,48 @@ mod tests {
             let ((_, a_rest), (_, b_rest)) = swap_gains(t, from, to, swap, RATE);
             assert!((a_rest * a_rest + b_rest * b_rest - 1.0).abs() < 1e-9, "power at {t}");
         }
+    }
+
+    #[test]
+    fn tempo_ratios_become_short_fractions_close_to_them() {
+        for x in [1.0, 0.95, 1.0225, 160.0 / 155.0, 48_000.0 * 0.97 / 44_100.0, 44_100.0 * 1.06 / 48_000.0] {
+            let (up, down) = fraction(x, MAX_PHASES);
+            assert!(up <= MAX_PHASES && down <= MAX_PHASES, "{x}: {up}/{down}");
+            let error = (up as f64 / down as f64 - x).abs() / x;
+            // A millisecond over ten minutes is 1.7e-6.
+            assert!(error < 1e-6, "{x}: {up}/{down} is {error:e} off");
+        }
+        assert_eq!(fraction(1.0, MAX_PHASES), (1, 1));
+        assert_eq!(fraction(0.5, MAX_PHASES), (1, 2));
+    }
+
+    #[test]
+    fn nothing_moves_outside_a_transition() {
+        for bass_swap in [true, false] {
+            let (from, to, swap) = (RATE as isize, 9 * RATE as isize, 5 * RATE as isize);
+            assert_eq!(blend(0, from, to, swap, RATE, bass_swap), ((1.0, 1.0), (0.0, 0.0)));
+            assert_eq!(blend(20 * RATE as isize, from, to, swap, RATE, bass_swap), ((0.0, 0.0), (1.0, 1.0)));
+            // And the shortcut meets the curve where it ends.
+            let ((a_bass, a_rest), (b_bass, b_rest)) = blend(to - 1, from, to, swap, RATE, bass_swap);
+            assert!(a_rest < 1e-3 && b_rest > 0.999 && a_bass < 1e-3 && b_bass > 0.999);
+        }
+    }
+
+    #[test]
+    fn a_wav_is_its_header_and_its_samples() {
+        let path = std::env::temp_dir().join(format!("stelly-mix-wav-{}.wav", std::process::id()));
+        let audio = Stereo {
+            left: vec![0.5; 100],
+            right: vec![-0.5; 100],
+            rate: RATE,
+        };
+        write_wav(&path, &audio).unwrap();
+        let bytes = std::fs::read(&path).unwrap();
+        std::fs::remove_file(&path).unwrap();
+        assert_eq!(bytes.len(), 44 + 400);
+        assert_eq!(&bytes[40..44], &400u32.to_le_bytes());
+        assert_eq!(i16::from_le_bytes([bytes[44], bytes[45]]), 16383);
+        assert_eq!(i16::from_le_bytes([bytes[46], bytes[47]]), -16383);
     }
 
     #[test]
