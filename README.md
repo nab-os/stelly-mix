@@ -207,8 +207,29 @@ fits a grid per 20s window, to see where a track drifts.
 3. Sets that go somewhere: an energy arc, a tempo that moves, a key path.
 4. Two-deck playback, live.
 
+## Sources
+
+Tracks are files. Anything else, a streaming service or a server, is a
+`Source` (`src/source.rs`) that turns its own references, `name:rest`, into
+files in `~/.cache/stelly-mix/<name>`; every command that takes a file takes a
+reference too, and `search <name> <query>` lists them. This build registers
+none, so it carries no service's client, credentials or terms. A build that
+wants one is its own crate, with a `main` that passes it in:
+
+```rust
+fn main() -> anyhow::Result<()> {
+    stelly_mix::cli::run(vec![Box::new(MyService::from_env()?)])
+}
+```
+
 ## Building
 
-`stelly-audio` comes from the private Stelly repository over SSH, which is
-why `.cargo/config.toml` hands git to the git CLI. It points at the
-`shared-audio-crate` branch until that is merged.
+A Rust toolchain, a C++ compiler and libclang (for Signalsmith Stretch).
+`stelly-audio`, the analysis shared with Stelly, comes from its own
+repository, and CLAP's weights are fetched on first use (117MB for the audio
+tower, 500MB more for the text tower if `find` or `--like` is used).
+
+## License
+
+Licensed under either of [Apache License 2.0](LICENSE-APACHE) or
+[MIT license](LICENSE-MIT) at your option.

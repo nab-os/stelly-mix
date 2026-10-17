@@ -7,6 +7,7 @@
 
 pub mod bands;
 pub mod beats;
+pub mod cli;
 pub mod decode;
 pub mod eval;
 pub mod grid;
@@ -16,6 +17,7 @@ pub mod models;
 pub mod render;
 pub mod segments;
 pub mod set;
+pub mod source;
 pub mod structure;
 pub mod tempo;
 pub mod text;

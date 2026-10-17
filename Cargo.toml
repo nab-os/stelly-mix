@@ -3,6 +3,8 @@ name = "stelly-mix"
 version = "0.1.0"
 edition = "2021"
 description = "Beat grids, phrases and transitions for people who mix"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/nab-os/stelly-mix"
 
 [[bin]]
 name = "stelly-mix"
@@ -11,7 +13,7 @@ path = "src/main.rs"
 [dependencies]
 # Decoding, the descriptors and CLAP's audio tower, shared with Stelly; every
 # codec on, for local files.
-stelly-audio = { git = "ssh://git@github.com/nab-os/stelly.git", branch = "shared-audio-crate", features = ["all-codecs"] }
+stelly-audio = { git = "https://github.com/nab-os/stelly-audio", features = ["all-codecs"] }
 
 anyhow = "1"
 argh = "0.1.19"
