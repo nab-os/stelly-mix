@@ -17,7 +17,7 @@ members = [".", "app"]
 [dependencies]
 # Decoding (Opus and stereo included), the descriptors, CLAP's two towers and
 # fetching their weights, shared with Stelly; every codec on, for local files.
-stelly-audio = { git = "https://github.com/nab-os/stelly-audio", features = ["all-codecs", "text", "fetch"] }
+stelly-audio = { git = "https://github.com/nab-os/stelly-audio", tag = "v0.1.0", features = ["all-codecs", "text", "fetch"] }
 
 anyhow = "1"
 argh = "0.1.19"
