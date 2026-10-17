@@ -15,6 +15,7 @@ pub mod library;
 pub mod models;
 pub mod render;
 pub mod segments;
+pub mod set;
 pub mod structure;
 pub mod tempo;
 pub mod transitions;

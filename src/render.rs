@@ -1,24 +1,26 @@
-//! A transition rendered to a file, to judge by ear what the scores claim.
+//! Transitions rendered to a file, to judge by ear what the scores claim: one
+//! between two tracks, or a whole set of them.
 //!
-//! The incoming phrase starts on the outgoing one's first beat, both eight
-//! bars, and the transition runs over them. The incoming track is resampled
-//! onto the playing one's tempo, which is what keeps the beats together, then
-//! with keylock its pitch is put back where it was by Signalsmith Stretch;
-//! without, it moves as on a turntable, at most a semitone at ±6%. The
-//! louder of the two is turned down to the other's loudness.
+//! The set runs at one tempo, the first track's. Every track is resampled
+//! onto it, which is what keeps the beats together, then with keylock its
+//! pitch is put back where it was by Signalsmith Stretch; without, it moves
+//! as on a turntable, at most a semitone at ±6%. An incoming phrase starts
+//! on the outgoing one's first beat, and the transition runs over it.
 //!
 //! The transition is a bass swap, as a DJ does it on a mixer's EQ: the two
 //! tracks' mids and highs cross over the phrase, equal-power, while the
 //! incoming bass is held back until the downbeat in the middle, where the
 //! basses trade places. Two kicks and two basslines never play over each
-//! other. Or, with `bass_swap` off, a plain equal-power crossfade. The whole
-//! render sits 3 dB under the quieter track, so the transition, where both
-//! play, has room, and a limiter catches what peaks remain.
+//! other. Or, with `bass_swap` off, a plain equal-power crossfade.
+//!
+//! Every track is brought to the quietest one's loudness, and the whole
+//! render sits 3 dB under that, so a transition, where two play, has room; a
+//! limiter catches what peaks remain.
 
 use crate::decode::Stereo;
 use crate::library::Track;
-use crate::transitions::Transition;
-use anyhow::{Context, Result};
+use crate::transitions::{fold, Transition};
+use anyhow::{ensure, Context, Result};
 use std::f64::consts::{FRAC_PI_2, PI, SQRT_2};
 use std::io::Write;
 use std::path::Path;
@@ -29,7 +31,7 @@ const CROSSOVER_HZ: f64 = 150.0;
 /// How long the basses take to trade places: short enough to land on the
 /// beat, long enough not to click.
 const SWAP_SECONDS: f64 = 0.03;
-/// How far under the quieter track the render is set. Masters peak at full
+/// How far under the quietest track the render is set. Masters peak at full
 /// scale, and two of them beat-matched, at the middle of an equal-power
 /// blend, reach 1.4: 3 dB is room enough that the limiter only touches the
 /// odd peak, rather than pulling every kick of the transition down and
@@ -42,8 +44,6 @@ const RELEASE: f64 = 0.1;
 
 #[derive(Debug, Clone)]
 pub struct Settings {
-    /// Seconds of each track around the transition.
-    pub lead: f64,
     pub keylock: bool,
     pub bass_swap: bool,
 }
@@ -51,116 +51,166 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            lead: 30.0,
             keylock: true,
             bass_swap: true,
         }
     }
 }
 
-pub struct Rendered {
-    pub audio: Stereo,
-    /// Where the transition starts and ends in the rendered audio, seconds.
-    pub fade: (f64, f64),
-    /// Where the basses trade places, seconds, with a bass swap.
+/// Where things happen in a render, seconds into it.
+#[derive(Debug, Clone)]
+pub struct Cue {
+    /// When each track starts to be heard.
+    pub enters: f64,
+    /// The transition out of it, and where its bass hands over, but for the last.
+    pub transition: Option<(f64, f64)>,
     pub swap: Option<f64>,
 }
 
+pub struct Rendered {
+    pub audio: Stereo,
+    pub cues: Vec<Cue>,
+}
+
+/// One transition, with `lead` seconds either side.
 pub fn render(
     playing: &Track,
     a: &Stereo,
     next: &Track,
     b: &Stereo,
     transition: &Transition,
+    lead: f64,
     settings: &Settings,
 ) -> Result<Rendered> {
-    let rate = a.rate;
-    let (out, into) = (&playing.segments[transition.out], &next.segments[transition.into]);
-    let sample = |seconds: f64| (seconds * rate as f64).round() as isize;
+    let out = &playing.segments[transition.out];
+    let into = &next.segments[transition.into];
+    // The incoming track runs `ratio` slower here, so its lead after the
+    // transition is `lead / ratio` of its own seconds.
+    let last_end = into.end + lead / transition.ratio;
+    let audio = [a, b];
+    render_chain(
+        &[playing, next],
+        std::slice::from_ref(transition),
+        (out.start - lead).max(0.0),
+        last_end,
+        settings,
+        |i| Ok(audio[i].clone()),
+    )
+}
 
-    let start = sample((out.start - settings.lead).max(0.0));
-    let (fade_from, fade_to) = (sample(out.start), sample(out.end));
-    let end = fade_to + sample(settings.lead);
-    // The downbeat nearest the middle of the phrase.
-    let middle = (out.start + out.end) / 2.0;
-    let swap_at = playing
-        .analysis
-        .downbeats
-        .iter()
-        .copied()
-        .filter(|d| *d > out.start && *d < out.end)
-        .min_by(|x, y| (x - middle).abs().total_cmp(&(y - middle).abs()))
-        .unwrap_or(middle);
-    let swap = sample(swap_at);
+/// A chain of tracks, each mixed into the next by its transition. The first
+/// is heard from `first_from` of its own seconds, the last up to `last_to`.
+/// `load` decodes track `i` of the chain; it is called twice a track, once to
+/// measure them all and once to mix, so that only one is held at a time.
+pub fn render_chain(
+    tracks: &[&Track],
+    transitions: &[Transition],
+    first_from: f64,
+    last_to: f64,
+    settings: &Settings,
+    mut load: impl FnMut(usize) -> Result<Stereo>,
+) -> Result<Rendered> {
+    ensure!(!tracks.is_empty() && transitions.len() + 1 == tracks.len(), "a chain wants one transition fewer than tracks");
+    let master = tracks[0].bpm().context("the first track has no tempo")?;
+    // One second of track k lasts `rates[k]` seconds in the set.
+    let rates: Vec<f64> = tracks.iter().map(|t| t.bpm().map_or(1.0, |bpm| fold(bpm / master))).collect();
 
-    // Both brought to the quieter one's loudness, less the headroom: turning
-    // the hotter track down, as a DJ does with the trim. Boosting the quieter one instead
-    // would drive a master already peaking at full scale into the limiter on
-    // every kick, which takes it back down, and unevenly.
-    let (a_gain, b_gain) = match (body_loudness(a, playing), body_loudness(b, next)) {
-        (Some(a), Some(b)) => {
-            let target = a.min(b) - HEADROOM_DB;
-            (db(target - a), db(target - b))
-        }
-        _ => (1.0, 1.0),
-    };
-
-    // The incoming track from its phrase on, on the playing track's tempo:
-    // one second of it lasts `ratio` seconds here.
-    let ratio = transition.ratio;
-    let needed = (end - fade_from) as usize;
-    let b = stretch(b, rate, ratio, settings.keylock, into.start, needed);
-
-    let length = (end - start) as usize;
-    let mut channels = Vec::with_capacity(2);
-    for (a_channel, b_channel) in [(&a.left, &b.0), (&a.right, &b.1)] {
-        let a_part: Vec<f32> = (start..end)
-            .map(|t| usize::try_from(t).ok().and_then(|i| a_channel.get(i)).map_or(0.0, |v| v * a_gain))
-            .collect();
-        let b_part: Vec<f32> = (start..end)
-            .map(|t| {
-                usize::try_from(t - fade_from)
-                    .ok()
-                    .and_then(|i| b_channel.get(i))
-                    .map_or(0.0, |v| v * b_gain)
-            })
-            .collect();
-        let (a_low, b_low) = if settings.bass_swap {
-            (lowpass(&a_part, rate), lowpass(&b_part, rate))
-        } else {
-            (vec![0.0; length], vec![0.0; length])
-        };
-
-        let mixed: Vec<f32> = (0..length)
-            .map(|i| {
-                let t = start + i as isize;
-                let (a_gains, b_gains) = if settings.bass_swap {
-                    swap_gains(t, fade_from, fade_to, swap, rate)
-                } else {
-                    let fade = progress(t, fade_from, fade_to);
-                    let (a, b) = ((fade * FRAC_PI_2).cos(), (fade * FRAC_PI_2).sin());
-                    ((a, a), (b, b))
-                };
-                let (a_high, b_high) = (a_part[i] - a_low[i], b_part[i] - b_low[i]);
-                (a_low[i] as f64 * a_gains.0
-                    + a_high as f64 * a_gains.1
-                    + b_low[i] as f64 * b_gains.0
-                    + b_high as f64 * b_gains.1) as f32
-            })
-            .collect();
-        channels.push(mixed);
+    // Track k's second `x` is the set's second `offsets[k] + x * rates[k]`.
+    let mut offsets = vec![-first_from * rates[0]];
+    let mut windows = Vec::new();
+    for (k, transition) in transitions.iter().enumerate() {
+        let out = &tracks[k].segments[transition.out];
+        let into = &tracks[k + 1].segments[transition.into];
+        let at = |x: f64| offsets[k] + x * rates[k];
+        let middle = (out.start + out.end) / 2.0;
+        let swap = tracks[k]
+            .analysis
+            .downbeats
+            .iter()
+            .copied()
+            .filter(|d| *d > out.start && *d < out.end)
+            .min_by(|x, y| (x - middle).abs().total_cmp(&(y - middle).abs()))
+            .unwrap_or(middle);
+        let window = (at(out.start), at(out.end), at(swap));
+        offsets.push(window.0 - into.start * rates[k + 1]);
+        windows.push(window);
     }
-    let right = channels.pop().unwrap_or_default();
-    let mut left = channels.pop().unwrap_or_default();
-    let mut right = right;
+    let n = tracks.len();
+    let enters: Vec<f64> = (0..n).map(|k| if k == 0 { 0.0 } else { windows[k - 1].0 }).collect();
+    let leaves: Vec<f64> = (0..n)
+        .map(|k| if k + 1 < n { windows[k].1 } else { offsets[k] + last_to * rates[k] })
+        .collect();
 
+    // Levels: every track to the quietest one's body loudness, less headroom.
+    let mut levels = Vec::with_capacity(n);
+    for (k, track) in tracks.iter().enumerate() {
+        levels.push(body_loudness(&load(k)?, track));
+    }
+    let target = levels.iter().flatten().copied().fold(f64::INFINITY, f64::min) - HEADROOM_DB;
+    let rate = load(0)?.rate;
+    let sample = |seconds: f64| (seconds * rate as f64).round().max(0.0) as usize;
+    let total = sample(leaves[n - 1]);
+    let (mut left, mut right) = (vec![0f32; total], vec![0f32; total]);
+
+    for k in 0..n {
+        let audio = load(k)?;
+        let gain = levels[k].map_or(1.0, |l| db(target - l));
+        let (from, to) = (sample(enters[k]), sample(leaves[k]).min(total));
+        if to <= from {
+            continue;
+        }
+        let local_from = (enters[k] - offsets[k]) / rates[k];
+        let (l, r) = stretch(&audio, rate, rates[k], settings.keylock, local_from, to - from);
+        drop(audio);
+
+        let incoming = k.checked_sub(1).map(|j| windows[j]);
+        let outgoing = (k + 1 < n).then(|| windows[k]);
+        let gains = |i: usize| -> (f64, f64) {
+            let t = (from + i) as isize;
+            let s = |x: f64| (x * rate as f64).round() as isize;
+            let mut g = (1.0, 1.0);
+            if let Some((start, end, swap)) = incoming {
+                let (_, b) = blend(t, s(start), s(end), s(swap), rate, settings.bass_swap);
+                g = (g.0 * b.0, g.1 * b.1);
+            }
+            if let Some((start, end, swap)) = outgoing {
+                let (a, _) = blend(t, s(start), s(end), s(swap), rate, settings.bass_swap);
+                g = (g.0 * a.0, g.1 * a.1);
+            }
+            g
+        };
+        for (channel, out) in [(l, &mut left), (r, &mut right)] {
+            let low = if settings.bass_swap { lowpass(&channel, rate) } else { vec![0.0; channel.len()] };
+            for (i, (&x, &lo)) in channel.iter().zip(&low).enumerate() {
+                let (bass, rest) = gains(i);
+                out[from + i] += gain * (lo as f64 * bass + (x - lo) as f64 * rest) as f32;
+            }
+        }
+    }
     limit(&mut left, &mut right, rate);
-    let seconds = |s: isize| (s - start) as f64 / rate as f64;
+
+    let cues = (0..n)
+        .map(|k| Cue {
+            enters: enters[k],
+            transition: windows.get(k).map(|w| (w.0, w.1)),
+            swap: windows.get(k).filter(|_| settings.bass_swap).map(|w| w.2),
+        })
+        .collect();
     Ok(Rendered {
         audio: Stereo { left, right, rate },
-        fade: (seconds(fade_from), seconds(fade_to)),
-        swap: settings.bass_swap.then(|| seconds(swap)),
+        cues,
     })
+}
+
+/// (bass, rest) gains of the outgoing and incoming tracks at sample `t` of a
+/// transition from `from` to `to`, a bass swap at `swap` or a crossfade.
+fn blend(t: isize, from: isize, to: isize, swap: isize, rate: u32, bass_swap: bool) -> ((f64, f64), (f64, f64)) {
+    if bass_swap {
+        swap_gains(t, from, to, swap, rate)
+    } else {
+        let fade = progress(t, from, to) * FRAC_PI_2;
+        ((fade.cos(), fade.cos()), (fade.sin(), fade.sin()))
+    }
 }
 
 /// (bass, rest) gains of the outgoing and incoming tracks at sample `t`.

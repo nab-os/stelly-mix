@@ -25,7 +25,32 @@ enum Command {
     Index(Index),
     Next(Next),
     Mix(Mix),
+    Set(Set),
     Eval(Eval),
+}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "set")]
+/// Plan a set from a first track through the library, and render it.
+struct Set {
+    /// how long, in minutes
+    #[argh(option, default = "30.0")]
+    minutes: f64,
+    /// where to write it
+    #[argh(option, default = "PathBuf::from(\"set.wav\")")]
+    out: PathBuf,
+    /// only plan it, and print the tracklist
+    #[argh(switch)]
+    no_render: bool,
+    /// largest tempo change from the first track's, in percent
+    #[argh(option, default = "6.0")]
+    stretch: f64,
+    /// partial sets carried forward while planning
+    #[argh(option, default = "8")]
+    beam: usize,
+    /// the track to start from; indexed first if it is not yet
+    #[argh(positional)]
+    first: PathBuf,
 }
 
 #[derive(FromArgs)]
@@ -137,6 +162,7 @@ fn main() -> Result<()> {
         Command::Index(args) => index(&args)?,
         Command::Next(args) => next(&args)?,
         Command::Mix(args) => mix(&args)?,
+        Command::Set(args) => set(&args)?,
         Command::Eval(args) => evaluate(&args)?,
     }
     Ok(())
@@ -225,6 +251,7 @@ fn mix(args: &Mix) -> Result<()> {
     let (playing, next) = (indexed(&library, &args.from)?, indexed(&library, &args.to)?);
     let options = stelly_mix::transitions::Options {
         max_stretch: args.stretch / 100.0,
+        ..Default::default()
     };
     let transition = stelly_mix::transitions::from(&playing, std::slice::from_ref(&next), &options)
         .into_iter()
@@ -240,11 +267,12 @@ fn mix(args: &Mix) -> Result<()> {
     let a = stelly_mix::decode::decode_stereo(&playing.path)?;
     let b = stelly_mix::decode::decode_stereo(&next.path)?;
     let settings = stelly_mix::render::Settings {
-        lead: args.lead,
         keylock: !args.turntable,
         bass_swap: !args.crossfade,
     };
-    let rendered = stelly_mix::render::render(&playing, &a, &next, &b, &transition, &settings)?;
+    let rendered = stelly_mix::render::render(&playing, &a, &next, &b, &transition, args.lead, &settings)?;
+    let cue = &rendered.cues[0];
+    let (fade_from, fade_to) = cue.transition.unwrap_or_default();
     stelly_mix::render::write_wav(&args.out, &rendered.audio)?;
     let (out, into) = (&playing.segments[transition.out], &next.segments[transition.into]);
     println!(
@@ -255,10 +283,79 @@ fn mix(args: &Mix) -> Result<()> {
         next.name(),
         clock(into.start),
         (transition.ratio - 1.0) * 100.0,
-        clock(rendered.fade.0),
-        clock(rendered.fade.1),
-        rendered.swap.map_or(String::new(), |s| format!(", basses swap at {}", clock(s)))
+        clock(fade_from),
+        clock(fade_to),
+        cue.swap.map_or(String::new(), |s| format!(", basses swap at {}", clock(s)))
     );
+    Ok(())
+}
+
+fn set(args: &Set) -> Result<()> {
+    let library = Library::open(Library::default_dir())?;
+    let first = indexed(&library, &args.first)?;
+    let tracks = library.all()?;
+    let start = tracks
+        .iter()
+        .position(|t| t.path == first.path)
+        .context("the first track is not in the library")?;
+    let options = stelly_mix::set::Options {
+        seconds: args.minutes * 60.0,
+        max_stretch: args.stretch / 100.0,
+        beam: args.beam,
+        ..Default::default()
+    };
+    let plan = stelly_mix::set::plan(&tracks, start, &options).context("the first track has no tempo")?;
+    let chain: Vec<&stelly_mix::library::Track> = plan.tracks.iter().map(|&i| &tracks[i]).collect();
+    eprintln!(
+        "{} tracks, {} transitions averaging {:.2}, {} before the last comes in",
+        chain.len(),
+        plan.transitions.len(),
+        plan.mean_score(),
+        clock(plan.seconds)
+    );
+
+    let cues = if args.no_render {
+        None
+    } else {
+        let settings = stelly_mix::render::Settings::default();
+        let last_to = chain.last().map_or(0.0, |t| t.analysis.seconds);
+        let started = Instant::now();
+        let rendered = stelly_mix::render::render_chain(&chain, &plan.transitions, 0.0, last_to, &settings, |k| {
+            stelly_mix::decode::decode_stereo(&chain[k].path)
+        })?;
+        stelly_mix::render::write_wav(&args.out, &rendered.audio)?;
+        eprintln!(
+            "{}: {} long, rendered in {:.0}s",
+            args.out.display(),
+            clock(rendered.audio.len() as f64 / rendered.audio.rate as f64),
+            started.elapsed().as_secs_f64()
+        );
+        Some(rendered.cues)
+    };
+
+    let master = chain[0].bpm().unwrap_or(0.0);
+    let key = |t: &stelly_mix::library::Track| t.analysis.key.as_ref().map_or("?".into(), |k| k.camelot.clone());
+    for (k, track) in chain.iter().enumerate() {
+        let at = cues.as_ref().map_or(String::new(), |c| format!("{}  ", clock(c[k].enters)));
+        let bpm = track.bpm().unwrap_or(0.0);
+        println!(
+            "{at}{}  ({:.2} BPM{}, {})",
+            track.name(),
+            bpm,
+            if k == 0 { String::new() } else { format!(" played at {master:.2}") },
+            key(track)
+        );
+        if let Some(t) = plan.transitions.get(k) {
+            let (out, into) = (&track.segments[t.out], &chain[k + 1].segments[t.into]);
+            println!(
+                "      ↳ out at {} into {}, score {:.2}, sound {:.2}",
+                clock(out.start),
+                clock(into.start),
+                t.score,
+                t.sound
+            );
+        }
+    }
     Ok(())
 }
 
@@ -268,6 +365,7 @@ fn next(args: &Next) -> Result<()> {
     let others = library.all()?;
     let options = stelly_mix::transitions::Options {
         max_stretch: args.stretch / 100.0,
+        ..Default::default()
     };
     let transitions = stelly_mix::transitions::from(&playing, &others, &options);
 
@@ -472,6 +570,18 @@ fn bpm_range(text: &str) -> Result<(f64, f64), String> {
     Ok((min, max))
 }
 
+/// "m:ss.s", rounded to the tenth first so 59.97s reads 1:00.0, not 0:60.0.
 fn clock(seconds: f64) -> String {
-    format!("{}:{:04.1}", (seconds / 60.0) as u64, seconds % 60.0)
+    let tenths = (seconds * 10.0).round().max(0.0) as u64;
+    format!("{}:{:02}.{}", tenths / 600, tenths / 10 % 60, tenths % 10)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn clock_carries_into_the_minute() {
+        assert_eq!(super::clock(59.97), "1:00.0");
+        assert_eq!(super::clock(204.04), "3:24.0");
+        assert_eq!(super::clock(5.0), "0:05.0");
+    }
 }

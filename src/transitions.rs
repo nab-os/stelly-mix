@@ -28,11 +28,17 @@ const ENERGY_RANGE: f64 = 6.0;
 pub struct Options {
     /// Largest tempo change allowed, as a fraction: 0.06 is ±6%.
     pub max_stretch: f64,
+    /// The tempo the incoming track will play at, when it is not the playing
+    /// track's own: a set held at one tempo. Stretch is measured from it.
+    pub tempo: Option<f64>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Self { max_stretch: 0.06 }
+        Self {
+            max_stretch: 0.06,
+            tempo: None,
+        }
     }
 }
 
@@ -46,7 +52,8 @@ pub struct Transition {
     pub into: usize,
     pub score: f64,
     pub sound: f64,
-    /// Incoming tempo over outgoing, octaves folded: 1.02 is 2% faster.
+    /// Incoming tempo over the one it will play at, the outgoing track's or
+    /// the set's, octaves folded: 1.02 is 2% faster.
     pub ratio: f64,
     pub key_steps: Option<u32>,
     /// Incoming loudness minus outgoing, LU.
@@ -56,7 +63,18 @@ pub struct Transition {
 /// The best transition into each of `others`, best first. The playing track
 /// is mixed out of from its second half, the next one mixed into in its first.
 pub fn from(playing: &Track, others: &[Track], options: &Options) -> Vec<Transition> {
-    let Some(bpm) = playing.bpm() else { return Vec::new() };
+    from_allowed(playing, others, options, |_, _| true)
+}
+
+/// As `from`, over only the `others` that `allowed` lets through: a set's
+/// planner leaves out what it has played and what is too far from its tempo.
+pub fn from_allowed(
+    playing: &Track,
+    others: &[Track],
+    options: &Options,
+    allowed: impl Fn(usize, &Track) -> bool,
+) -> Vec<Transition> {
+    let Some(bpm) = options.tempo.or(playing.bpm()) else { return Vec::new() };
     let outs = half(playing, false);
 
     // Each track's best pair of phrases first, by how alike they sound and
@@ -64,7 +82,7 @@ pub fn from(playing: &Track, others: &[Track], options: &Options) -> Vec<Transit
     let mut best: Vec<(Transition, f64, f64)> = others
         .iter()
         .enumerate()
-        .filter(|(_, next)| next.path != playing.path)
+        .filter(|(to, next)| next.path != playing.path && allowed(*to, next))
         .filter_map(|(to, next)| {
             let ratio = fold(next.bpm()? / bpm);
             let stretch = (ratio - 1.0).abs();
@@ -142,7 +160,7 @@ fn half(track: &Track, first: bool) -> Vec<usize> {
 
 /// A tempo ratio moved by octaves to within a tritone of 1: a 174 track
 /// after an 87 one is a 1.0, not a 2.0.
-fn fold(mut ratio: f64) -> f64 {
+pub fn fold(mut ratio: f64) -> f64 {
     while ratio > std::f64::consts::SQRT_2 {
         ratio /= 2.0;
     }

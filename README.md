@@ -56,6 +56,25 @@ beats together, then keylocked back to its own pitch by Signalsmith Stretch.
 equal-power fade. Analysed again, a render is one grid from end to end:
 99–100% of its beats on it, before, during and after the transition.
 
+`set` plans a whole set from a first track and renders it:
+
+```sh
+cargo run --release -- set --minutes 30 --out set.wav first.opus
+```
+
+The set keeps the first track's tempo, every track keylocked onto it, so
+candidates are ranked by their stretch from that tempo, not from the track
+before: a run of 155s would otherwise score as perfect while each plays 3%
+fast. A beam of the best partial sets is grown a transition at a time, no
+track twice, each track playing at least 90 seconds between its transitions,
+and the set with the best average transition wins. Planning 30 minutes over
+159 tracks takes under a second; rendering it, a track decoded at a time,
+about a minute and a half and 1.5GB. It prints the tracklist with the times
+each track comes in. On the first one rendered, from Remon Verhoeve's The
+Engine: 12 tracks in 34 minutes, each solo section within -9.9 to -12.3
+LUFS, and the 20s windows around every transition 85–100% on one grid, but
+one at 70%.
+
 Levels are matched the way a DJ trims: each track's main sections, the 80th
 percentile of its phrases' stereo loudness, not its average, which a quiet
 intro drags down, and not the analysis's mono figure, which reads a wide
@@ -169,7 +188,8 @@ fits a grid per 20s window, to see where a track drifts.
    other than 4/4, downbeats. And a set nearer what DJs play: Ballroom is
    no hard tech.
 2. Transitions tuned by ear: the weights are a first guess.
-3. Two-deck playback, live.
+3. Sets that go somewhere: an energy arc, a tempo that moves, a key path.
+4. Two-deck playback, live.
 
 ## Building
 
