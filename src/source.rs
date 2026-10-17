@@ -49,8 +49,46 @@ pub trait Source: Send + Sync {
     fn search(&self, query: &str, limit: usize) -> Result<Vec<Item>>;
 
     /// The item's audio as a file in `cache`, fetched if it is not there
-    /// already.
+    /// already. Called from several threads at once while indexing.
     fn fetch(&self, item: &Item, cache: &Path) -> Result<PathBuf>;
+
+    /// The item's file in `cache` if it was fetched already, without asking
+    /// the service anything: what lets `index` pass over what it has.
+    fn cached(&self, _item: &Item, _cache: &Path) -> Option<PathBuf> {
+        None
+    }
+}
+
+/// A file an argument comes to, not yet fetched.
+pub enum Pending<'a> {
+    File(PathBuf),
+    Item(&'a dyn Source, Item),
+}
+
+impl Pending<'_> {
+    /// The file, fetched into its source's cache if need be.
+    pub fn fetch(&self) -> Result<PathBuf> {
+        match self {
+            Pending::File(path) => Ok(path.clone()),
+            Pending::Item(source, item) => source.fetch(item, &cache_dir(source.name())),
+        }
+    }
+
+    /// The file if it is there without fetching.
+    pub fn cached(&self) -> Option<PathBuf> {
+        match self {
+            Pending::File(path) => Some(path.clone()),
+            Pending::Item(source, item) => source.cached(item, &cache_dir(source.name())),
+        }
+    }
+
+    /// What to call it in a message.
+    pub fn name(&self) -> String {
+        match self {
+            Pending::File(path) => path.display().to_string(),
+            Pending::Item(source, item) => format!("{}:{} ({} - {})", source.name(), item.id, item.artist, item.title),
+        }
+    }
 }
 
 /// The registered sources, and the files their references come to.
@@ -69,27 +107,46 @@ impl Sources {
         self.0.iter().map(|s| s.name()).collect()
     }
 
-    /// `argument` as files: a path is itself; `name:rest`, with `name` a
-    /// registered source, is what that source fetches for it.
-    pub fn files(&self, argument: &str) -> Result<Vec<PathBuf>> {
+    /// What `argument` comes to, nothing fetched yet: a path is itself;
+    /// `name:rest`, with `name` a registered source, is what that source
+    /// resolves it to, each item once.
+    pub fn pending(&self, argument: &str) -> Result<Vec<Pending<'_>>> {
         let Some((source, reference)) = self.split(argument) else {
-            return Ok(vec![PathBuf::from(argument)]);
+            return Ok(vec![Pending::File(PathBuf::from(argument))]);
         };
-        let cache = cache_dir(source.name());
-        source
+        let mut seen = std::collections::HashSet::new();
+        Ok(source
             .resolve(reference)?
+            .into_iter()
+            // A playlist can hold a track twice; fetched twice at once, the
+            // two would write the same file.
+            .filter(|item| seen.insert(item.id.clone()))
+            .map(|item| Pending::Item(source, item))
+            .collect())
+    }
+
+    /// `argument` as files, fetched. A track that cannot be fetched, a
+    /// delisted one say, is reported and left out rather than failing the
+    /// rest of its playlist.
+    pub fn files(&self, argument: &str) -> Result<Vec<PathBuf>> {
+        let pending = self.pending(argument)?;
+        let files: Vec<PathBuf> = pending
             .iter()
-            .map(|item| source.fetch(item, &cache))
-            .collect()
+            .filter_map(|p| p.fetch().map_err(|err| eprintln!("{}: {err:#}", p.name())).ok())
+            .collect();
+        if files.is_empty() && !pending.is_empty() {
+            bail!("{argument}: none of its {} tracks could be fetched", pending.len());
+        }
+        Ok(files)
     }
 
     /// One file for `argument`, which must name one track.
     pub fn file(&self, argument: &str) -> Result<PathBuf> {
-        let mut files = self.files(argument)?;
-        if files.len() != 1 {
-            bail!("{argument} names {} tracks, not one", files.len());
+        let mut pending = self.pending(argument)?;
+        if pending.len() != 1 {
+            bail!("{argument} names {} tracks, not one", pending.len());
         }
-        Ok(files.remove(0))
+        pending.remove(0).fetch()
     }
 
     fn split<'a>(&self, argument: &'a str) -> Option<(&dyn Source, &'a str)> {
@@ -126,6 +183,8 @@ mod tests {
             };
             Ok(match reference {
                 "all" => vec![item("1"), item("2")],
+                "playlist" => vec![item("1"), item("delisted"), item("1"), item("2")],
+                "gone" => vec![item("delisted")],
                 id => vec![item(id)],
             })
         }
@@ -133,6 +192,9 @@ mod tests {
             Ok(Vec::new())
         }
         fn fetch(&self, item: &Item, cache: &Path) -> Result<PathBuf> {
+            if item.id == "delisted" {
+                bail!("not streamable");
+            }
             Ok(cache.join(format!("{}.flac", item.file_stem())))
         }
     }
@@ -148,5 +210,17 @@ mod tests {
         assert!(file.starts_with(cache_dir("fake")));
         assert_eq!(sources.files("fake:all").unwrap().len(), 2);
         assert!(sources.file("fake:all").is_err());
+    }
+
+    #[test]
+    fn a_track_that_cannot_be_fetched_does_not_stop_its_playlist() {
+        let sources = Sources::new(vec![Box::new(Fake)]);
+        // The repeat is fetched once, the delisted track left out.
+        assert_eq!(sources.pending("fake:playlist").unwrap().len(), 3);
+        assert_eq!(sources.files("fake:playlist").unwrap().len(), 2);
+        assert!(sources.files("fake:gone").is_err());
+        // One track asked for by itself still fails with its own reason.
+        let err = sources.file("fake:delisted").unwrap_err();
+        assert!(format!("{err:#}").contains("not streamable"), "{err:#}");
     }
 }

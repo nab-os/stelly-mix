@@ -13,7 +13,7 @@ use std::time::Instant;
 use stelly_audio::clap::AudioEncoder;
 use crate::eval::{self, Truth};
 use crate::library::Library;
-use crate::source::{Source, Sources};
+use crate::source::{Pending, Source, Sources};
 
 #[derive(FromArgs)]
 /// Beat grids, phrases and keys for people who mix.
@@ -214,6 +214,12 @@ pub fn run(sources: Vec<Box<dyn Source>>) -> Result<()> {
 
 const AUDIO: [&str; 8] = ["mp3", "flac", "wav", "aif", "aiff", "ogg", "opus", "m4a"];
 
+fn is_audio(path: &Path) -> bool {
+    path.extension()
+        .and_then(|e| e.to_str())
+        .is_some_and(|e| AUDIO.contains(&e.to_ascii_lowercase().as_str()))
+}
+
 fn search(args: &Search, sources: &Sources) -> Result<()> {
     let source = sources.get(&args.source).with_context(|| {
         let names = sources.names();
@@ -242,16 +248,19 @@ fn index(args: &Index, sources: &Sources) -> Result<()> {
     for argument in &args.paths {
         let path = Path::new(argument);
         if path.is_dir() {
-            walk(path, &mut |p| files.push(p.to_path_buf()))?;
+            walk(path, &mut |p| files.push(Pending::File(p.to_path_buf())))?;
         } else {
-            files.extend(sources.files(argument)?);
+            files.extend(sources.pending(argument)?);
         }
     }
-    files.retain(|f| {
-        let audio = f.extension().and_then(|e| e.to_str()).is_some_and(|e| AUDIO.contains(&e.to_ascii_lowercase().as_str()));
-        audio && library.get(f).is_none()
+    // What is here and indexed already is passed over. The rest is fetched
+    // by the workers, so a playlist is analysed as it comes down rather than
+    // after the last of it has.
+    files.retain(|p| p.cached().is_none_or(|f| is_audio(&f) && library.get(&f).is_none()));
+    files.sort_by_key(|p| match p {
+        Pending::File(f) => Some(f.clone()),
+        Pending::Item(..) => None,
     });
-    files.sort();
     if files.is_empty() {
         eprintln!("everything is indexed already");
         return Ok(());
@@ -273,8 +282,19 @@ fn index(args: &Index, sources: &Sources) -> Result<()> {
                     let mut encoder = AudioEncoder::load(&models, 1)?;
                     loop {
                         let i = next.fetch_add(1, Ordering::Relaxed);
-                        let Some(file) = files.get(i) else { return Ok(()) };
-                        match crate::library::index(file, &options, &mut encoder) {
+                        let Some(pending) = files.get(i) else { return Ok(()) };
+                        let file = match pending.fetch() {
+                            Ok(file) => file,
+                            Err(err) => {
+                                eprintln!("{}: {err:#}", pending.name());
+                                continue;
+                            }
+                        };
+                        // A fetched file's name is its source's: checked once it is here.
+                        if matches!(pending, Pending::Item(..)) && (!is_audio(&file) || library.get(&file).is_some()) {
+                            continue;
+                        }
+                        match crate::library::index(&file, &options, &mut encoder) {
                             Ok(track) => {
                                 library.put(&track)?;
                                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
