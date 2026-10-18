@@ -33,6 +33,7 @@ enum Command {
     Search(Search),
     Eval(Eval),
     Compact(Compact),
+    RenameSource(RenameSource),
     Sync(Sync),
     ServerAnalyse(ServerAnalyse),
 }
@@ -59,6 +60,19 @@ struct Sync {}
 #[argh(subcommand, name = "compact")]
 /// Rewrite the library's entries in the current, smaller form.
 struct Compact {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "rename-source")]
+/// File the tracks from one source under another name: `qobuz stelly` for a
+/// library synced from Stelly before 2.0, whose ids are the same.
+struct RenameSource {
+    /// the name they are filed under now
+    #[argh(positional)]
+    from: String,
+    /// the name to file them under
+    #[argh(positional)]
+    to: String,
+}
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "search")]
@@ -260,6 +274,11 @@ pub fn run(sources: Vec<Box<dyn Source>>) -> Result<()> {
                 }
             })?;
             eprintln!("brought {done} entries in {:.0}s", started.elapsed().as_secs_f64());
+        }
+        Command::RenameSource(args) => {
+            let library = Library::open(Library::default_dir())?;
+            let done = library.rename_source(&args.from, &args.to)?;
+            eprintln!("{done} entries from {} are {}'s now", args.from, args.to);
         }
         Command::Compact(_) => {
             let library = Library::open(Library::default_dir())?;

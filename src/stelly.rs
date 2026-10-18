@@ -1,11 +1,12 @@
 //! Stelly's server as stelly-mix's: it holds the mix analysis of every track
 //! it has been asked to, and hands out signed URLs for their audio.
 //!
-//! `sync` mirrors its mix library into the local one, as `<provider>:<id>`
-//! entries, named after the server's music provider, `qobuz:<id>` for
-//! Qobuz, so what is already here is not fetched twice; and as a source of
-//! that name it fetches a track's audio when it is to be heard. Everything else, next, sets, renders, finds,
-//! then runs here on the mirror, offline included.
+//! `sync` mirrors its mix library into the local one, as `stelly:<id>`
+//! entries, by the server's own ids, so what is already here is not fetched
+//! twice; and as the `stelly` source it fetches a track's audio, from
+//! whichever of the server's providers has it, when it is to be heard.
+//! Everything else, next, sets, renders, finds, then runs here on the
+//! mirror, offline included.
 //!
 //! It wants `STELLY_SERVER` and `STELLY_TOKEN`, from the environment or
 //! `~/.config/stelly-mix/stelly.env`.
@@ -23,9 +24,9 @@ use std::time::Duration;
 
 /// Entries asked for at once while syncing.
 const CHUNK: usize = 200;
-/// What a server before providers had behind it, and what it says it has
-/// when it cannot say.
-const OLDEST_PROVIDER: &str = "qobuz";
+/// What Stelly's tracks are called here: `stelly:<id>`, by the server's own
+/// ids, whichever of its providers has the audio.
+pub const SOURCE: &str = "stelly";
 /// Extensions a fetched track may have been kept under.
 const KEPT: [&str; 8] = ["flac", "mp3", "ogg", "opus", "m4a", "wav", "aiff", "audio"];
 
@@ -33,16 +34,13 @@ pub struct Stelly {
     base: String,
     token: String,
     agent: ureq::Agent,
-    /// The server's music provider's name: what its tracks' origins are
-    /// prefixed with.
-    provider: String,
 }
 
 impl Stelly {
     /// The server named by `STELLY_SERVER` and `STELLY_TOKEN`, if both are
     /// set, in the environment or in stelly-mix's config.
     pub fn from_env() -> Option<Self> {
-        let files: Vec<PathBuf> = config_dir().map(|d| vec![d.join("stelly.env"), d.join("qobuz.env")]).unwrap_or_default();
+        let files: Vec<PathBuf> = config_dir().map(|d| vec![d.join("stelly.env")]).unwrap_or_default();
         let read = |key: &str| {
             std::env::var(key).ok().filter(|v| !v.is_empty()).or_else(|| {
                 files.iter().find_map(|f| {
@@ -59,13 +57,7 @@ impl Stelly {
             .timeout_connect(Some(Duration::from_secs(10)))
             .build()
             .new_agent();
-        let mut stelly = Self { base: base.trim_end_matches('/').to_string(), token, agent, provider: OLDEST_PROVIDER.into() };
-        if let Ok(capabilities) = stelly.get::<Value>("/api/capabilities", &[]) {
-            if let Some(name) = capabilities["name"].as_str() {
-                stelly.provider = name.to_string();
-            }
-        }
-        Some(stelly)
+        Some(Self { base: base.trim_end_matches('/').to_string(), token, agent })
     }
 
     fn get<T: DeserializeOwned>(&self, path: &str, query: &[(&str, String)]) -> Result<T> {
@@ -102,7 +94,7 @@ impl Stelly {
             .library()?
             .into_iter()
             .map(|s| s.id)
-            .filter(|id| library.by_origin(&format!("{}:{id}", self.provider)).is_none())
+            .filter(|id| library.by_origin(&format!("{SOURCE}:{id}")).is_none())
             .collect();
         let mut done = 0;
         report(0, missing.len());
@@ -229,20 +221,18 @@ fn item(track: &Value) -> Option<Item> {
     })
 }
 
-/// The provider's tracks by way of Stelly: `<provider>:<id>` is a track of
-/// its space.
+/// The server's tracks: `stelly:<id>` is a track of its space.
 impl Source for Stelly {
     fn name(&self) -> &str {
-        &self.provider
+        SOURCE
     }
 
     fn resolve(&self, reference: &str) -> Result<Vec<Item>> {
-        let provider = &self.provider;
-        let id: i64 = reference.parse().with_context(|| format!("{provider}:{reference}: expected a track id"))?;
+        let id: i64 = reference.parse().with_context(|| format!("{SOURCE}:{reference}: expected a track id"))?;
         let tracks: Vec<Value> = self.post("/api/space/tracks", &serde_json::json!({ "ids": [id] }))?;
         let items: Vec<Item> = tracks.iter().filter_map(item).collect();
         if items.is_empty() {
-            bail!("{provider}:{reference}: not in Stelly's space");
+            bail!("{SOURCE}:{reference}: not in Stelly's space");
         }
         Ok(items)
     }

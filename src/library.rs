@@ -199,6 +199,22 @@ impl Library {
         Ok(done)
     }
 
+    /// Call `from`'s tracks `to`'s: each entry fetched from the source named
+    /// `from` is filed under `to` instead, the same item. The number moved.
+    pub fn rename_source(&self, from: &str, to: &str) -> Result<usize> {
+        let mut done = 0;
+        for path in self.entries()? {
+            let Ok(bytes) = std::fs::read(&path) else { continue };
+            let Ok(mut track) = serde_json::from_slice::<Track>(&bytes) else { continue };
+            let Some(origin) = track.origin.as_mut().filter(|o| o.source == from) else { continue };
+            origin.source = to.to_string();
+            self.put(&track)?;
+            std::fs::remove_file(&path)?;
+            done += 1;
+        }
+        Ok(done)
+    }
+
     fn entries(&self) -> Result<Vec<PathBuf>> {
         Ok(std::fs::read_dir(&self.dir)?
             .filter_map(|e| Some(e.ok()?.path()))
@@ -309,6 +325,12 @@ mod tests {
         library.put(&track).unwrap();
         assert_eq!(library.by_origin("qobuz:42").map(|t| t.path), Some(file.clone()));
         assert!(library.by_origin("qobuz:43").is_none());
+
+        // Filed under another source's name, the same item.
+        assert_eq!(library.rename_source("qobuz", "stelly").unwrap(), 1);
+        assert!(library.by_origin("qobuz:42").is_none());
+        assert_eq!(library.by_origin("stelly:42").map(|t| t.path), Some(file.clone()));
+        assert_eq!(library.rename_source("qobuz", "stelly").unwrap(), 0);
         assert_eq!(library.all().unwrap().len(), 1);
         std::fs::remove_dir_all(&dir).unwrap();
     }
