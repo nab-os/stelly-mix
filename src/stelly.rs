@@ -162,11 +162,7 @@ impl Stelly {
             return Ok(file);
         }
         std::fs::create_dir_all(cache).with_context(|| format!("creating {}", cache.display()))?;
-        // A server before 1.2 knows only `format`, Qobuz's format ids, and
-        // one since then only `quality`.
-        let format = if quality == "lossy" { "5" } else { "6" };
-        let query = [("quality", quality.to_string()), ("format", format.to_string())];
-        let url: Value = self.get(&format!("/api/tracks/{}/url", item.id), &query)?;
+        let url: Value = self.get(&format!("/api/tracks/{}/url", item.id), &[("quality", quality.to_string())])?;
         let url = url["url"].as_str().context("Stelly's server gave no URL")?;
         let mut response = ureq::get(url).call().with_context(|| format!("downloading {}", item.title))?;
         // What came, which is not always what was asked for.
