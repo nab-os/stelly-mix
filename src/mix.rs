@@ -1,4 +1,4 @@
-//! A mix library held in memory, named by Qobuz id, and what is asked of it:
+//! A mix library held in memory, named by the provider's id, and what is asked of it:
 //! what a server answers its clients with. No input or output here: the
 //! server loads the tracks, and embeds a description with its own text tower.
 
@@ -16,7 +16,7 @@ pub struct Mix {
 }
 
 impl Mix {
-    /// `tracks`, each with its Qobuz id.
+    /// `tracks`, each with its provider's id.
     pub fn new(entries: Vec<(i64, Track)>) -> Self {
         let (ids, tracks): (Vec<i64>, Vec<Track>) = entries.into_iter().unzip();
         let by_id = ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
@@ -126,7 +126,7 @@ mod tests {
     }
 
     #[test]
-    fn ways_and_sets_speak_in_qobuz_ids() {
+    fn ways_and_sets_speak_in_provider_ids() {
         let mix = library();
         let ways = mix.next(10, 6.0, 10).unwrap();
         assert!(!ways.is_empty());

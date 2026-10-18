@@ -1,6 +1,6 @@
 //! What crosses between a server holding a mix library, Stelly's, and its
-//! clients: the app and the command line. Tracks are named by their Qobuz id,
-//! which is what the server's catalogue is keyed by.
+//! clients: the app and the command line. Tracks are named by their provider's
+//! id, which is what the server's catalogue is keyed by.
 
 use crate::library::Track;
 use crate::transitions::Transition;
@@ -155,7 +155,7 @@ pub struct Status {
     pub version: u32,
 }
 
-/// A library entry with its Qobuz id, as a server hands several over.
+/// A library entry with its provider's id, as a server hands several over.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Entry {
     pub id: i64,
@@ -178,7 +178,7 @@ pub enum Selection {
     Album { id: String },
     /// The artist's own releases.
     Artist { id: i64 },
-    /// A Qobuz playlist's tracks.
+    /// A playlist's tracks, on a provider that has playlists.
     Playlist { id: i64 },
     /// What the family has liked: tracks, and albums whole.
     Favourites,

@@ -112,7 +112,7 @@ next to the coarse analysis its space is built from. Point stelly-mix at it:
 ```sh
 export STELLY_SERVER=http://127.0.0.1:7700 STELLY_TOKEN=<a device's token>
 cargo run --release -- sync      # mirror what it has analysed into the library
-cargo run --release -- next qobuz:<track id>
+cargo run --release -- next qobuz:<track id>   # or local:<id>, as its provider is named
 ```
 
 To have it analyse more, with a device of `admin` scope:
@@ -128,8 +128,9 @@ cargo run --release -- server-analyse "around/<id>?n=50"     # or genre/<genres>
 It follows the server's progress, then syncs. The app's Index box takes the
 same, written `stelly:album/<id>` and so on.
 
-`sync` brings its entries in as `qobuz:<id>` tracks, and the server is then a
-`qobuz` source: their audio comes from its signed URLs when a track is played,
+`sync` brings its entries in as `<provider>:<id>` tracks, named after the
+server's music provider (`qobuz:<id>`, `local:<id>`), and the server is then a
+source of that name: their audio comes from the URLs it hands out when a track is played,
 mixed or rendered, into the same capped cache as any source's. The app syncs
 at start. The two settings can also go in `~/.config/stelly-mix/stelly.env`.
 
