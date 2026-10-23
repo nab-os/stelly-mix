@@ -5,6 +5,9 @@
 use stelly_mix_app::work;
 
 fn main() -> anyhow::Result<()> {
+    // The window registers these before anything asks for audio; without
+    // them a library mirrored from a server has nothing to fetch with.
+    work::set_sources(stelly_mix::stelly::sources());
     let started = std::time::Instant::now();
     let loaded = work::load()?;
     println!("library: {} tracks in {:.1}s, sound scale {:?}", loaded.tracks.len(), started.elapsed().as_secs_f64(), loaded.scale);
@@ -13,7 +16,9 @@ fn main() -> anyhow::Result<()> {
         .find(|&i| loaded.tracks[i].analysis.grid.as_ref().is_some_and(|g| g.steady) && loaded.tracks[i].segments.len() > 6)
         .expect("a steady track");
     let track = &loaded.tracks[first];
-    let peaks = work::peaks(&track.path)?;
+    // Through the source, as the window does: a track from a server is named
+    // after the recording and its `path` is not a file to decode.
+    let peaks = work::peaks(&work::audio(track)?)?;
     println!("waveform of {}: {} points, loudest {:.2}", track.name(), peaks.len(), peaks.iter().cloned().fold(0.0, f32::max));
 
     let ways = work::next(&loaded, first, 0.06);

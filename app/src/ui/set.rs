@@ -33,10 +33,44 @@ fn SetPanel(lib: Lib) -> Element {
     let mut plan = use_signal(|| None::<Plan>);
     let mut clip = use_signal(|| None::<Clip>);
     let mut busy = use_signal(|| None::<&'static str>);
+    let mut name = use_signal(String::new);
+    let kept = use_signal(|| None::<String>);
 
     let first = (state.selected)().and_then(|p| lib.0.index_of(&p));
     let first_name = first.map(|i| lib.0.tracks[i].name());
     let can_plan = busy().is_none() && (first.is_some() || !like().trim().is_empty());
+
+    // Takes the library rather than holding it, so it stays Copy and both
+    // the button and the Enter key can call it.
+    let save = move |lib: Lib| {
+        let (mut busy, mut name, mut kept) = (busy, name, kept);
+        {
+            let Some(planned) = plan() else { return };
+            let wanted = name().trim().to_string();
+            if wanted.is_empty() {
+                return;
+            }
+            let terms = stelly_mix::sets::Planned {
+                minutes: minutes(),
+                max_stretch: stretch() / 100.0,
+                beam: beam(),
+                min_transition: floor(),
+                like: Some(like().trim().to_string()).filter(|text| !text.is_empty()),
+            };
+            busy.set(Some("keeping it"));
+            spawn(async move {
+                let saved = work::blocking(move || work::save_set(&lib.0, &planned, &wanted, terms)).await;
+                busy.set(None);
+                match saved {
+                    Ok(set) => {
+                        kept.set(Some(set.name.clone()));
+                        name.set(String::new());
+                    }
+                    Err(err) => state.fail(err),
+                }
+            });
+        }
+    };
 
     let make_plan = {
         let lib = lib.clone();
@@ -151,8 +185,37 @@ fn SetPanel(lib: Lib) -> Element {
                     button { class: "primary", disabled: !can_plan, onclick: make_plan, "Plan" }
                     button { disabled: plan().is_none() || busy().is_some(), onclick: render, "Render and play" }
                 }
+                if plan().is_some() {
+                    div { class: "form",
+                        div { class: "field wide",
+                            label { "Keep it as" }
+                            input {
+                                placeholder: "a name you will recognise",
+                                value: "{name}",
+                                oninput: move |event| name.set(event.value()),
+                                onkeydown: {
+                                    let lib = lib.clone();
+                                    move |event: Event<KeyboardData>| {
+                                        if event.key() == Key::Enter { save(lib.clone()); }
+                                    }
+                                },
+                            }
+                        }
+                        button {
+                            disabled: name().trim().is_empty() || busy().is_some(),
+                            onclick: {
+                                let lib = lib.clone();
+                                move |_| save(lib.clone())
+                            },
+                            "Keep"
+                        }
+                    }
+                }
                 if let Some(what) = busy() {
                     div { class: "muted small", "{what}" }
+                }
+                if let Some(under) = kept() {
+                    div { class: "notice small", "Kept as {under}. The Sets tab has it." }
                 }
             }
 

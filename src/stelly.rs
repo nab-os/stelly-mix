@@ -41,19 +41,30 @@ pub struct Stelly {
 }
 
 impl Stelly {
+    /// A server at `base` with `token`, whatever the environment says.
+    pub fn new(base: &str, token: &str) -> Self {
+        let agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .build()
+            .new_agent();
+        Self { base: base.trim().trim_end_matches('/').to_string(), token: token.trim().to_string(), agent }
+    }
+
+    /// Where it is pointed, for a window that shows it.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     /// The server named by `STELLY_SERVER` and `STELLY_TOKEN`, if both are
     /// set, in the environment or in stelly-mix's config.
     pub fn from_env() -> Option<Self> {
         let files: Vec<PathBuf> = config_dir().map(|d| vec![d.join("stelly.env")]).unwrap_or_default();
         let read = |key: &str| {
-            std::env::var(key).ok().filter(|v| !v.is_empty()).or_else(|| {
-                files.iter().find_map(|f| {
-                    std::fs::read_to_string(f).ok()?.lines().find_map(|l| {
-                        let (k, v) = l.trim().strip_prefix("export ").unwrap_or(l.trim()).split_once('=')?;
-                        (k.trim() == key).then(|| v.trim().trim_matches(['"', '\'']).to_string()).filter(|v| !v.is_empty())
-                    })
-                })
-            })
+            std::env::var(key)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .or_else(|| files.iter().find_map(|file| from_file(file, key)))
         };
         let (base, token) = (read("STELLY_SERVER")?, read("STELLY_TOKEN")?);
         let agent = ureq::Agent::config_builder()
@@ -232,6 +243,49 @@ fn answer<T: DeserializeOwned>(path: &str, mut response: ureq::http::Response<ur
     serde_json::from_str(&body).with_context(|| format!("parsing {path}"))
 }
 
+/// One setting out of a `KEY=value` file, as `from_env` reads them:
+/// `export ` is allowed in front, and quotes around the value come off.
+fn from_file(file: &Path, key: &str) -> Option<String> {
+    std::fs::read_to_string(file).ok()?.lines().find_map(|line| {
+        let (k, v) = line.trim().strip_prefix("export ").unwrap_or(line.trim()).split_once('=')?;
+        (k.trim() == key).then(|| v.trim().trim_matches(['"', '\'']).to_string()).filter(|v| !v.is_empty())
+    })
+}
+
+/// Where the server and token are kept when they are not in the
+/// environment: `~/.config/stelly-mix/stelly.env`.
+pub fn config_file() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("stelly.env"))
+}
+
+/// Whether the environment is naming a server, in which case what is
+/// written to the config file will not be what the next run uses.
+pub fn env_overrides() -> bool {
+    ["STELLY_SERVER", "STELLY_TOKEN"].iter().any(|key| std::env::var(key).is_ok_and(|value| !value.is_empty()))
+}
+
+/// Keep `base` and `token` for every later run. The file is written whole,
+/// so anything else in it is not preserved: it holds these two settings.
+pub fn save(base: &str, token: &str) -> Result<PathBuf> {
+    let file = config_file().context("there is no home directory to keep settings in")?;
+    save_to(&file, base, token)?;
+    Ok(file)
+}
+
+fn save_to(file: &Path, base: &str, token: &str) -> Result<()> {
+    let dir = file.parent().context("a config file has a directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
+    let body = format!(
+        "# Written by stelly-mix. The environment wins over this file.\nSTELLY_SERVER={}\nSTELLY_TOKEN={}\n",
+        base.trim().trim_end_matches('/'),
+        token.trim()
+    );
+    let partial = file.with_extension(format!("{}.part", std::process::id()));
+    std::fs::write(&partial, body).with_context(|| format!("writing {}", partial.display()))?;
+    std::fs::rename(&partial, file).with_context(|| format!("moving {} into place", file.display()))?;
+    Ok(())
+}
+
 fn config_dir() -> Option<PathBuf> {
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
@@ -303,6 +357,29 @@ pub fn sources() -> Vec<Box<dyn Source>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn what_is_saved_is_what_a_later_run_reads() {
+        let dir = std::env::temp_dir().join(format!("stelly-mix-env-{}", std::process::id()));
+        let file = dir.join("stelly.env");
+        save_to(&file, "https://music.example.org/", "  abc123  ").unwrap();
+
+        assert_eq!(from_file(&file, "STELLY_SERVER").as_deref(), Some("https://music.example.org"), "the trailing slash comes off");
+        assert_eq!(from_file(&file, "STELLY_TOKEN").as_deref(), Some("abc123"), "and the padding with it");
+        assert_eq!(from_file(&file, "STELLY_NOTHING"), None);
+
+        // Written whole each time, so the second save is not the first plus
+        // the second.
+        save_to(&file, "http://nas:7700", "zzz").unwrap();
+        assert_eq!(from_file(&file, "STELLY_SERVER").as_deref(), Some("http://nas:7700"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap().lines().filter(|l| l.starts_with("STELLY_SERVER")).count(), 1);
+
+        // The forms a hand-written file might use are still read.
+        std::fs::write(&file, "export STELLY_TOKEN=\"quoted\"\n# a comment\nSTELLY_SERVER='single'\n").unwrap();
+        assert_eq!(from_file(&file, "STELLY_TOKEN").as_deref(), Some("quoted"));
+        assert_eq!(from_file(&file, "STELLY_SERVER").as_deref(), Some("single"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// An entry as the server hands it over, from `source`.
     fn entry(id: i64, source: &str, track_id: &str) -> Entry {

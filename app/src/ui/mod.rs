@@ -2,8 +2,11 @@
 //! middle, the player along the bottom.
 
 mod find;
+pub mod icons;
 mod player;
 mod set;
+mod sets;
+mod settings;
 mod sidebar;
 mod track;
 mod waveform;
@@ -19,7 +22,9 @@ pub use player::Player;
 pub enum View {
     Track,
     Set,
+    Sets,
     Find,
+    Settings,
 }
 
 /// The library, compared by which load it is rather than by what it holds,
@@ -130,7 +135,9 @@ pub fn App() -> Element {
                 match (state.view)() {
                     View::Track => rsx! { track::TrackView {} },
                     View::Set => rsx! { set::SetView {} },
+                    View::Sets => rsx! { sets::SetsView {} },
                     View::Find => rsx! { find::FindView {} },
+                    View::Settings => rsx! { settings::SettingsView {} },
                 }
             }
             player::PlayerBar {}
@@ -141,20 +148,24 @@ pub fn App() -> Element {
 #[component]
 fn Tabs() -> Element {
     let mut view = use_context::<State>().view;
-    let tab = move |which: View, label: &'static str| {
+    let tab = move |which: View, label: &'static str, icon: Element| {
         rsx! {
             button {
                 class: if view() == which { "tab active" } else { "tab" },
                 onclick: move |_| view.set(which),
+                {icon}
                 "{label}"
             }
         }
     };
     rsx! {
         div { class: "tabs",
-            {tab(View::Track, "Track")}
-            {tab(View::Set, "Set")}
-            {tab(View::Find, "Find")}
+            {tab(View::Track, "Track", icons::track())}
+            {tab(View::Set, "Set", icons::set())}
+            {tab(View::Sets, "Sets", icons::sets())}
+            {tab(View::Find, "Find", icons::find())}
+            span { class: "spacer" }
+            {tab(View::Settings, "Settings", icons::settings())}
         }
     }
 }

@@ -37,6 +37,8 @@ enum Command {
     Sync(Sync),
     ServerAnalyse(ServerAnalyse),
     ServerStop(ServerStop),
+    Sets(SetsCommand),
+    Export(Export),
 }
 
 #[derive(FromArgs)]
@@ -62,6 +64,34 @@ struct ServerStop {}
 /// Bring Stelly's server's mix analyses into the library: STELLY_SERVER and
 /// STELLY_TOKEN say where it is.
 struct Sync {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "sets")]
+/// The sets kept: their names, length and how well they mix.
+struct SetsCommand {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "export")]
+/// Write a kept set into a folder to open on the decks: its tracks, a
+/// playlist, a cue sheet, a reference mix, and the mix points as cues.
+struct Export {
+    /// what to hand it to: rekordbox, traktor, engine, serato or plain
+    #[argh(option, default = "crate::export::Target::Rekordbox")]
+    target: crate::export::Target,
+    /// where to put the folder (default: here)
+    #[argh(option, default = "PathBuf::from(\".\")")]
+    into: PathBuf,
+    /// write the playlist, cues and sheet only, leaving the audio out of
+    /// the folder
+    #[argh(switch)]
+    no_tracks: bool,
+    /// do not render the reference mix
+    #[argh(switch)]
+    no_reference: bool,
+    /// the set, by its id or its name
+    #[argh(positional)]
+    set: String,
+}
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "compact")]
@@ -133,6 +163,9 @@ struct Set {
     /// take no transition scoring under this (default 0.35)
     #[argh(option, default = "crate::set::MIN_TRANSITION")]
     min_transition: f64,
+    /// keep it under this name, to open, edit and export later
+    #[argh(option)]
+    save: Option<String>,
     /// the track to start from, indexed first if it is not yet; with
     /// `--like`, the library's best match when left out
     #[argh(positional)]
@@ -297,6 +330,24 @@ pub fn run(sources: Vec<Box<dyn Source>>) -> Result<()> {
             let done = library.rename_source(&args.from, &args.to)?;
             eprintln!("{done} entries from {} are {}'s now", args.from, args.to);
         }
+        Command::Sets(_) => {
+            let sets = crate::sets::Sets::open(crate::sets::Sets::default_dir())?;
+            let kept = sets.all()?;
+            if kept.is_empty() {
+                eprintln!("no sets yet: plan one with `set --save <name>`");
+            }
+            for set in kept {
+                println!(
+                    "{}  {}  ({} tracks, {}, transitions averaging {:.2})",
+                    set.id,
+                    set.name,
+                    set.tracks.len(),
+                    set.clock(),
+                    set.mean_score
+                );
+            }
+        }
+        Command::Export(args) => export(&args, &sources)?,
         Command::Compact(_) => {
             let library = Library::open(Library::default_dir())?;
             let started = Instant::now();
@@ -493,6 +544,60 @@ fn set(args: &Set, sources: &Sources) -> Result<()> {
         }
     }
 
+    if let Some(name) = &args.save {
+        let planned = crate::sets::Planned {
+            minutes: args.minutes,
+            max_stretch: args.stretch / 100.0,
+            beam: args.beam,
+            min_transition: args.min_transition,
+            like: args.like.clone(),
+        };
+        let kept = crate::sets::Set::of(name, &plan, &tracks, planned)?;
+        let sets = crate::sets::Sets::open(crate::sets::Sets::default_dir())?;
+        sets.put(&kept)?;
+        eprintln!("kept as {} ({})", kept.name, kept.id);
+    }
+    Ok(())
+}
+
+/// Hand a kept set over: `export <set> --target rekordbox`.
+fn export(args: &Export, sources: &Sources) -> Result<()> {
+    let sets = crate::sets::Sets::open(crate::sets::Sets::default_dir())?;
+    let kept = sets.all()?;
+    let wanted = args.set.trim();
+    let set = kept
+        .iter()
+        .find(|set| set.id == wanted)
+        .or_else(|| kept.iter().find(|set| set.name.eq_ignore_ascii_case(wanted)))
+        .with_context(|| {
+            if kept.is_empty() {
+                "no sets yet: plan one with `set --save <name>`".to_string()
+            } else {
+                format!("no set called {wanted:?}; `sets` lists them")
+            }
+        })?;
+
+    let options = crate::export::Options {
+        target: args.target,
+        tracks: !args.no_tracks,
+        reference: !args.no_reference,
+    };
+    if let Some(caveat) = args.target.caveat() {
+        eprintln!("{caveat}");
+    }
+    let library = Library::open(Library::default_dir())?.all()?;
+    let started = Instant::now();
+    let written = crate::export::write(set, &library, sources, &args.into, &options, &|line| eprintln!("{line}"))?;
+    for missing in &written.missing {
+        eprintln!("{missing} has left the library, and is not in the folder");
+    }
+    eprintln!(
+        "{}: {} files, {:.1} GB, in {:.0}s",
+        written.dir.display(),
+        written.files.len(),
+        written.bytes as f64 / 1e9,
+        started.elapsed().as_secs_f64()
+    );
     Ok(())
 }
 

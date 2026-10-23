@@ -48,9 +48,31 @@ impl Loaded {
 }
 
 /// Stelly's server, when one is set: its mix library is mirrored at start.
+/// The server this window talks to. Replaceable, so settings can point it
+/// somewhere else without a restart; leaked rather than locked, because
+/// every caller holds it for the length of a blocking call.
+static SERVER: Mutex<Option<&'static stelly_mix::stelly::Stelly>> = Mutex::new(None);
+static SERVER_READ: OnceLock<()> = OnceLock::new();
+
 pub fn stelly() -> Option<&'static stelly_mix::stelly::Stelly> {
-    static STELLY: OnceLock<Option<stelly_mix::stelly::Stelly>> = OnceLock::new();
-    STELLY.get_or_init(stelly_mix::stelly::Stelly::from_env).as_ref()
+    SERVER_READ.get_or_init(|| {
+        if let Some(found) = stelly_mix::stelly::Stelly::from_env() {
+            *SERVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::leak(Box::new(found)));
+        }
+    });
+    *SERVER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Point the window at `base` with `token` from here on, and keep it for
+/// the next run. The server is tried before it is kept: a token that does
+/// not work should not replace one that does.
+pub fn set_server(base: &str, token: &str) -> Result<stelly_mix::api::Status> {
+    let server = stelly_mix::stelly::Stelly::new(base, token);
+    let status = server.status()?;
+    stelly_mix::stelly::save(base, token)?;
+    SERVER_READ.get_or_init(|| {});
+    *SERVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::leak(Box::new(server)));
+    Ok(status)
 }
 
 pub fn library() -> Result<Library> {
@@ -197,6 +219,73 @@ pub fn render_set(loaded: &Loaded, plan: &Plan) -> Result<Clip> {
         title: format!("a set of {} from {}", chain.len(), chain[0].name()),
         marks,
     })
+}
+
+// ------------------------------------------------------------------- sets
+
+pub fn sets() -> Result<stelly_mix::sets::Sets> {
+    stelly_mix::sets::Sets::open(stelly_mix::sets::Sets::default_dir())
+}
+
+/// Every set kept, newest first.
+pub fn kept_sets() -> Result<Vec<stelly_mix::sets::Set>> {
+    sets()?.all()
+}
+
+/// Keep `plan` under `name`, as it was planned.
+pub fn save_set(loaded: &Loaded, plan: &Plan, name: &str, planned: stelly_mix::sets::Planned) -> Result<stelly_mix::sets::Set> {
+    let set = stelly_mix::sets::Set::of(name, plan, &loaded.tracks, planned)?;
+    sets()?.put(&set)?;
+    Ok(set)
+}
+
+/// Re-cut a set after an edit and keep it. The library's own sound scale is
+/// handed in rather than worked out again: it samples the whole library.
+pub fn edit_set(
+    loaded: &Loaded,
+    mut set: stelly_mix::sets::Set,
+    edit: impl FnOnce(&mut stelly_mix::sets::Set, &[Track], f64, stelly_mix::transitions::SoundScale) -> Result<()>,
+) -> Result<stelly_mix::sets::Set> {
+    let stretch = set.planned.max_stretch;
+    edit(&mut set, &loaded.tracks, stretch, loaded.scale)?;
+    sets()?.put(&set)?;
+    Ok(set)
+}
+
+/// Keep a set up to `at` and plan the rest again. The description it was
+/// planned on is scored again where it had one, which wants the text tower.
+pub fn replan_set(loaded: &Loaded, mut set: stelly_mix::sets::Set, at: usize) -> Result<stelly_mix::sets::Set> {
+    let mut options = set.planned.options();
+    if let Some(words) = set.planned.like.clone().filter(|text| !text.trim().is_empty()) {
+        options.like = Some(like(loaded, &words)?);
+    }
+    set.replan_from(at, &loaded.tracks, options)?;
+    sets()?.put(&set)?;
+    Ok(set)
+}
+
+/// What else could sit at `at` in `set`, best first.
+pub fn alternatives_for(loaded: &Loaded, set: &stelly_mix::sets::Set, at: usize, limit: usize) -> Vec<(String, f64)> {
+    set.alternatives(at, &loaded.tracks, set.planned.max_stretch, loaded.scale, limit)
+}
+
+pub fn put_set(set: &stelly_mix::sets::Set) -> Result<()> {
+    sets()?.put(set)
+}
+
+pub fn forget_set(id: &str) -> Result<bool> {
+    sets()?.remove(id)
+}
+
+/// Write a kept set into a folder to open on the decks.
+pub fn export_set(
+    set: &stelly_mix::sets::Set,
+    loaded: &Loaded,
+    into: &Path,
+    options: &stelly_mix::export::Options,
+    report: &dyn Fn(&str),
+) -> Result<stelly_mix::export::Exported> {
+    stelly_mix::export::write(set, &loaded.tracks, sources(), into, options, report)
 }
 
 /// Every track's likeness to `description`, 0..1 by rank. The text tower is
