@@ -123,10 +123,13 @@ cargo run --release -- server-analyse favourites            # the family's liked
 cargo run --release -- server-analyse "mood/dark rolling techno?n=200"
 cargo run --release -- server-analyse "artist-name/Lun?n=30" # its tracks and their nearest
 cargo run --release -- server-analyse "around/<id>?n=50"     # or genre/<genres>?n=<limit>
+cargo run --release -- server-stop                           # stop the one it is running
 ```
 
 It follows the server's progress, then syncs. The app's Index box takes the
-same, written `stelly:album/<id>` and so on.
+same, written `stelly:album/<id>` and so on. An analysis is hours of
+downloading and CPU, and the server keeps running it after the command that
+started it has gone; `server-stop` is how it is called off.
 
 `sync` brings its entries in as `stelly:<id>` tracks, by the server's own
 ids, and the server is then the `stelly` source: their audio comes from the
@@ -135,9 +138,17 @@ track is played, mixed or rendered, into the same capped cache as any
 source's. The app syncs at start. The two settings can also go in
 `~/.config/stelly-mix/stelly.env`.
 
-A library synced from a Stelly before 2.0 has them as `qobuz:<id>`, the same
-ids: `stelly-mix rename-source qobuz stelly` files them under the new name,
-rather than syncing them all again beside the old.
+A library synced from a Stelly before 2.0 has them under the provider that
+had the audio, `qobuz:<id>`, by the same ids. `sync` adopts those by itself,
+once, rather than fetching them all again beside the old; entries analysed
+before 2.0 still name their provider where the server stored them, and are
+filed under the id they were asked for whatever they say.
+`stelly-mix rename-source qobuz stelly` does the same by hand, for a source
+`sync` does not know about.
+
+`sync` reads the server's analysis version first and stops if it is not the
+one this stelly-mix writes, since neither side would read the other's
+entries.
 
 ## The app
 

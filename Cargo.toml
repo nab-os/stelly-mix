@@ -18,6 +18,10 @@ members = [".", "app"]
 # Decoding (Opus and stereo included), the descriptors, CLAP's two towers and
 # fetching their weights, shared with Stelly; every codec on, for local files.
 stelly-audio = { git = "https://github.com/nab-os/stelly-audio", tag = "v0.1.0", features = ["all-codecs", "text", "fetch"] }
+# The provider protocol's vocabulary, shared with Stelly's server: Quality,
+# so the spelling the server parses is never a string literal here. Its
+# default features are the types alone, without a client of its own.
+stelly-provider = { git = "https://github.com/nab-os/stelly-provider", tag = "v0.2.1" }
 
 anyhow = "1"
 argh = "0.1.19"

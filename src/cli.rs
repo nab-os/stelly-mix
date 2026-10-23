@@ -36,6 +36,7 @@ enum Command {
     RenameSource(RenameSource),
     Sync(Sync),
     ServerAnalyse(ServerAnalyse),
+    ServerStop(ServerStop),
 }
 
 #[derive(FromArgs)]
@@ -49,6 +50,12 @@ struct ServerAnalyse {
     #[argh(positional)]
     selection: String,
 }
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "server-stop")]
+/// Stop the analysis Stelly's server is running, wherever it has got to.
+/// Wants an admin device's token.
+struct ServerStop {}
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "sync")]
@@ -264,6 +271,16 @@ pub fn run(sources: Vec<Box<dyn Source>>) -> Result<()> {
             let brought = stelly.sync(&library, &|_, _| {})?;
             eprintln!("brought {brought} into the library");
         }
+        Command::ServerStop(_) => {
+            let stelly = crate::stelly::Stelly::from_env().context("set STELLY_SERVER and STELLY_TOKEN to ask Stelly's server")?;
+            // The server sets the job's cancel flag and answers at once, so
+            // what comes back is a job on its way down, not a finished one.
+            let status = stelly.stop()?;
+            match status.running {
+                true => eprintln!("stopping {}", status.selection.as_deref().unwrap_or("the analysis")),
+                false => eprintln!("nothing was running"),
+            }
+        }
         Command::Sync(_) => {
             let stelly = crate::stelly::Stelly::from_env().context("set STELLY_SERVER and STELLY_TOKEN to sync from Stelly's server")?;
             let library = Library::open(Library::default_dir())?;
@@ -475,6 +492,7 @@ fn set(args: &Set, sources: &Sources) -> Result<()> {
             );
         }
     }
+
     Ok(())
 }
 

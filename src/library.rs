@@ -215,6 +215,23 @@ impl Library {
         Ok(done)
     }
 
+    /// Bring entries filed under any of `from` under `to`, once. Mirrors
+    /// made before a source was renamed hold the same tracks under the old
+    /// name; left there they are fetched a second time, under the new one.
+    /// The marker means a library already adopted is not scanned again.
+    pub fn adopt_sources(&self, from: &[&str], to: &str) -> Result<usize> {
+        let marker = self.dir.join(format!(".adopted-{to}"));
+        if marker.exists() {
+            return Ok(0);
+        }
+        let mut done = 0;
+        for source in from {
+            done += self.rename_source(source, to)?;
+        }
+        std::fs::write(&marker, [])?;
+        Ok(done)
+    }
+
     fn entries(&self) -> Result<Vec<PathBuf>> {
         Ok(std::fs::read_dir(&self.dir)?
             .filter_map(|e| Some(e.ok()?.path()))

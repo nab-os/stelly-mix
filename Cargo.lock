@@ -4764,6 +4764,7 @@ dependencies = [
  "sha2",
  "signalsmith-stretch",
  "stelly-audio",
+ "stelly-provider",
  "ureq",
 ]
 
@@ -4777,6 +4778,16 @@ dependencies = [
  "serde_json",
  "stelly-mix",
  "tokio",
+]
+
+[[package]]
+name = "stelly-provider"
+version = "0.2.1"
+source = "git+https://github.com/nab-os/stelly-provider?tag=v0.2.1#ee6fcb58b7d5e972396d96ea08413a6784512337"
+dependencies = [
+ "anyhow",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
