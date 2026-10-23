@@ -19,6 +19,7 @@ pub mod mix;
 pub mod models;
 pub mod render;
 pub mod segments;
+pub mod serato;
 pub mod set;
 pub mod sets;
 pub mod source;

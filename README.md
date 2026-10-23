@@ -129,6 +129,49 @@ its voice from CLAP — a nu-metal track with shouted vocals throughout
 landed just over the line. The badge says it is a guess; the planner uses
 the score rather than the verdict, so it degrades rather than flips.
 
+## Handing a set over
+
+stelly-mix plans; the set is played somewhere else. `export` writes a folder
+holding the tracks in play order, a playlist, a cue sheet, a rendered
+reference mix, and the mix points as cues the other program will show:
+
+```sh
+cargo run --release -- sets                               # what is kept
+cargo run --release -- export "Friday night" --target mixxx --into ~/Music
+```
+
+| target | what it writes |
+|---|---|
+| `rekordbox` | `DJ_PLAYLISTS` XML: beat grid, key and memory cues, plus a playlist |
+| `traktor` | `collection.nml`: the same in Traktor's shape, cues in milliseconds |
+| `engine` | the playlist, plus the Rekordbox XML its conversion tool reads |
+| `serato` | the playlist, and the cues written into the files themselves |
+| `mixxx` | the same tags — Mixxx reads Serato's natively |
+| `plain` | the playlist, a cue sheet and the tracks |
+
+### Cues in the files
+
+Serato keeps hot cues inside the audio files rather than in a library of its
+own, and **Mixxx and VirtualDJ read the same tags** — so the mix points are
+written there too, as `Serato Markers2`: a `SERATO_MARKERS_V2` Vorbis
+comment in a FLAC, a `GEOB` frame in an MP3. One blob, three programs, and
+nothing of yours is touched: the tags go into the copies in the export
+folder.
+
+Mixxx will not take a Rekordbox XML — it wants a USB export built by
+Rekordbox itself — so this is how the planning reaches it.
+
+The format is not published by Serato; the layout used here is the
+reverse-engineered one [serato-tags][st] documents and Mixxx's own importer
+is written against. It is encoded twice over, which is the part that catches
+people out: two version bytes, then the markers themselves base64'd and
+newline-broken, then a null and padding. What is written is checked against
+[`triseratops`][tr], an independent reader, so the test fails if the bytes
+drift from what a real program would accept.
+
+[st]: https://github.com/Holzhaus/serato-tags
+[tr]: https://crates.io/crates/triseratops
+
 ## Stelly's server
 
 [Stelly](https://github.com/nab-os/stelly)'s server can hold the mix analysis

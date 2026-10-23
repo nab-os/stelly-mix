@@ -32,16 +32,19 @@ pub enum Target {
     /// Engine reads the playlist, and its conversion tool reads Rekordbox's
     /// XML for the cues, so it gets both.
     Engine,
-    /// Serato keeps its cues inside the files, in a shape of its own that
-    /// this does not write; the playlist and the tracks only. See
-    /// `Target::caveat`.
+    /// Serato keeps its cues inside the files; they are written there, so
+    /// they arrive placed.
     Serato,
+    /// Mixxx will not read a Rekordbox XML — it wants a USB export built by
+    /// Rekordbox itself — but it does read Serato's tags, so it gets those.
+    Mixxx,
     /// No program in particular: the playlist, a cue sheet and the tracks.
     Plain,
 }
 
 impl Target {
-    pub const ALL: [Target; 5] = [Target::Rekordbox, Target::Traktor, Target::Engine, Target::Serato, Target::Plain];
+    pub const ALL: [Target; 6] =
+        [Target::Rekordbox, Target::Traktor, Target::Engine, Target::Serato, Target::Mixxx, Target::Plain];
 
     pub fn as_str(self) -> &'static str {
         match self {
@@ -49,6 +52,7 @@ impl Target {
             Target::Traktor => "traktor",
             Target::Engine => "engine",
             Target::Serato => "serato",
+            Target::Mixxx => "mixxx",
             Target::Plain => "plain",
         }
     }
@@ -60,6 +64,7 @@ impl Target {
             Target::Traktor => "Traktor",
             Target::Engine => "Engine DJ",
             Target::Serato => "Serato",
+            Target::Mixxx => "Mixxx",
             Target::Plain => "Anything",
         }
     }
@@ -71,15 +76,17 @@ impl Target {
     /// here, so its tracks arrive in order but without the mix points.
     pub fn caveat(self) -> Option<&'static str> {
         match self {
-            Target::Serato => Some("Serato keeps cues inside the files, in a shape stelly-mix does not write: the tracks and their order come across, the mix points do not."),
             Target::Engine => Some("Engine reads the playlist by itself; the mix points come across through its Rekordbox conversion."),
+            Target::Mixxx => Some("Mixxx will not read a Rekordbox XML, so the mix points reach it through Serato's tags in the files, which it reads natively."),
             _ => None,
         }
     }
 
     /// Whether the mix points cross as cues the other program will show.
+    /// All of them do now: the ones with a library format of their own get
+    /// it, and the rest read the tags written into the files.
     pub fn carries_cues(self) -> bool {
-        !matches!(self, Target::Serato | Target::Plain)
+        true
     }
 }
 
@@ -193,6 +200,9 @@ pub fn write(set: &Set, library: &[Track], sources: &Sources, into: &Path, optio
             let Some(from) = from else { continue };
             report(&format!("copying {}", entry.name));
             std::fs::copy(from, &entry.file).with_context(|| format!("copying {} into {}", from.display(), entry.file.display()))?;
+            // Into the copy, never the cache: the folder is what is handed
+            // over, and the original is nobody's to rewrite.
+            crate::serato::write(&entry.file, &marks_as_cues(entry))?;
             files.push(entry.file.clone());
         }
     }
@@ -228,7 +238,7 @@ pub fn write(set: &Set, library: &[Track], sources: &Sources, into: &Path, optio
             std::fs::write(&nml, traktor(set, &entries)).with_context(|| format!("writing {}", nml.display()))?;
             files.push(nml);
         }
-        Target::Serato | Target::Plain => {}
+        Target::Serato | Target::Mixxx | Target::Plain => {}
     }
 
     let bytes = files.iter().filter_map(|f| std::fs::metadata(f).ok()).map(|m| m.len()).sum();
@@ -418,6 +428,21 @@ fn traktor(set: &Set, entries: &[Entry]) -> String {
     out
 }
 
+/// The same mix points as Serato's hot cues, which Serato, Mixxx and
+/// VirtualDJ all read out of the file itself.
+fn marks_as_cues(entry: &Entry) -> Vec<crate::serato::Cue> {
+    marks(entry)
+        .into_iter()
+        .enumerate()
+        .map(|(pad, (label, at))| crate::serato::Cue {
+            index: pad as u8,
+            at,
+            colour: if label == "mix in" { crate::serato::IN } else { crate::serato::OUT },
+            label: label.to_string(),
+        })
+        .collect()
+}
+
 /// The mix points a track carries, in the order they happen.
 fn marks(entry: &Entry) -> Vec<(&'static str, f64)> {
     let mut marks = Vec::new();
@@ -518,10 +543,28 @@ mod tests {
     }
 
     #[test]
-    fn only_the_targets_that_can_show_cues_claim_to() {
-        assert!(Target::Rekordbox.carries_cues() && Target::Traktor.carries_cues());
-        assert!(!Target::Serato.carries_cues(), "Serato's cues are not written, and it should not pretend");
-        assert!(Target::Serato.caveat().is_some());
+    fn every_target_carries_its_cues_one_way_or_another() {
+        for target in Target::ALL {
+            assert!(target.carries_cues(), "{target} should carry the mix points");
+        }
+        // The two that get there by a route worth explaining say so.
+        assert!(Target::Mixxx.caveat().is_some(), "Mixxx reads Serato's tags, not a Rekordbox XML");
+        assert!(Target::Engine.caveat().is_some());
+        assert!(Target::Serato.caveat().is_none(), "Serato reads the tags straight off");
+    }
+
+    #[test]
+    fn the_mix_points_become_hot_cues_on_their_own_pads() {
+        let cues = marks_as_cues(&entry());
+        assert_eq!(cues.len(), 2);
+        assert_eq!((cues[0].index, cues[0].at, cues[0].label.as_str()), (0, 16.0, "mix in"));
+        assert_eq!(cues[0].colour, crate::serato::IN);
+        assert_eq!((cues[1].index, cues[1].at, cues[1].label.as_str()), (1, 200.5, "mix out"));
+        assert_eq!(cues[1].colour, crate::serato::OUT);
+
+        // A track at the end of a set goes out nowhere, so it has one.
+        let last = Entry { mix_out: None, ..entry() };
+        assert_eq!(marks_as_cues(&last).len(), 1);
     }
 
     #[test]
