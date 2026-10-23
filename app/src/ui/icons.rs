@@ -154,3 +154,4 @@ pub fn settings() -> Element {
         path { d: "M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2.2 2.2M16.8 16.8L19 19M19 5l-2.2 2.2M7.2 16.8L5 19" }
     })
 }
+

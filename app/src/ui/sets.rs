@@ -407,11 +407,12 @@ fn SetDetail(set: Set, on_back: EventHandler<()>, on_changed: EventHandler<()>) 
                                 li { class: "item",
                                     div {
                                         div { class: "name ellipsis", "{track.name()}" }
-                                        div { class: "detail",
-                                            "{track.bpm().unwrap_or(0.0):.1} BPM"
-                                            if let Some(key) = track.analysis.key.as_ref() { " · {key.camelot}" }
+                                        div { class: "detail row-flex",
+                                            {super::vocals_badge(track)}
+                                            span { "{track.bpm().unwrap_or(0.0):.1} BPM" }
+                                            if let Some(key) = track.analysis.key.as_ref() { span { "· {key.camelot}" } }
                                             if let Some(step) = step {
-                                                " · out at {work::clock(track.segments[step.out].start)}"
+                                                span { "· out at {work::clock(track.segments[step.out].start)}" }
                                             }
                                         }
                                     }

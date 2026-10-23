@@ -103,6 +103,32 @@ other; peaks are held at -1 dBFS.
 
 Building it wants a C++ compiler and libclang, for Signalsmith Stretch.
 
+`vocals` listens through the library for singing and keeps what it hears:
+
+```sh
+cargo run --release -- vocals     # 5004 tracks in about two seconds
+```
+
+Nothing is re-analysed. Every phrase already holds CLAP's audio embedding,
+so a phrase is scored by how much nearer it sits to "a song with singing, a
+voice, vocals, lyrics" than to "an instrumental piece, no singing, no
+voice" — both asked together, because CLAP has no "not": ask it for "no
+human voice" and an orchestra outscores a singer.
+
+Tracks with a voice in them get a **vocals** badge on their line, and a
+transition is scored down where the mix would put two voices over each
+other — heavily when both sides sing, lightly when only one does, which is
+how a great many mixes are made. Over the best 30 ways out of a sung track,
+weighing voices took the mean clash from 0.51 to 0.12 and changed nine of
+the best ten destinations.
+
+It is a guess and a narrow one: measured on tracks whose answer is not in
+doubt, singing scored −0.049 and up while instrumentals reached −0.115, so
+the line sits between them with little room. A dense, distorted mix hides
+its voice from CLAP — a nu-metal track with shouted vocals throughout
+landed just over the line. The badge says it is a guess; the planner uses
+the score rather than the verdict, so it degrades rather than flips.
+
 ## Stelly's server
 
 [Stelly](https://github.com/nab-os/stelly)'s server can hold the mix analysis

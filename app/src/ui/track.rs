@@ -118,6 +118,7 @@ fn TrackPanel(lib: Lib, index: usize) -> Element {
                 div { class: "muted small ellipsis", "{track.path.display()}" }
             }
             div { class: "facts",
+                {super::vocals_badge(track)}
                 span { class: "fact", b { "{bpm}" } }
                 span { class: if steady { "fact good" } else { "fact warm" },
                     if steady { "steady grid" } else { "drifting tempo" }

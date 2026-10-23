@@ -213,6 +213,10 @@ button.danger:hover:not(:disabled) { background: var(--danger); color: var(--on-
 .warning { color: var(--warm); background: rgba(224, 175, 104, 0.1); border-left: 3px solid var(--warm); }
 .told { color: var(--accent); background: rgba(122, 162, 247, 0.1); border-left: 3px solid var(--accent); }
 
+/* Singing in it. Small enough to sit on a line in the library without
+   pushing the tempo and key out of their columns. */
+.badge.vocals { padding: 0 7px; font-size: 10px; letter-spacing: 0.04em; }
+
 /* Determinate progress. Filled by a scaleX rather than a width, so it moves
    without a layout. */
 .bar { flex: 1; height: 4px; border-radius: 2px; background: var(--bg); overflow: hidden; }
@@ -243,7 +247,7 @@ button.danger:hover:not(:disabled) { background: var(--danger); color: var(--on-
 .tracks { overflow-y: auto; flex: 1; padding: 0 6px 8px; }
 .track-row {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr auto auto auto;
   gap: 8px;
   padding: 5px 8px;
   border-radius: 6px;

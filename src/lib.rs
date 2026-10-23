@@ -27,6 +27,7 @@ pub mod structure;
 pub mod tempo;
 pub mod text;
 pub mod transitions;
+pub mod vocals;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
