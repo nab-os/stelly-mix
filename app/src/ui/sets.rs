@@ -9,7 +9,10 @@
 //! Nothing here writes to disk until Save. An edit changes what is on
 //! screen; the badge by the name says whether that has been kept.
 
+use super::search::Search;
+use super::waveform::{Span, Waveform};
 use super::{icons, score_class, Lib, State};
+use crate::work::Clip;
 use crate::work;
 use dioxus::prelude::*;
 use stelly_mix::export::{self, Target};
@@ -235,19 +238,18 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
     let mut picking: Signal<Option<Pick>> = use_signal(|| None);
     let mut saving_as = use_signal(|| false);
     let mut as_name = use_signal(String::new);
-
-    let Some(library) = state.library.read().clone() else {
-        return rsx! { div { class: "view", p { class: "muted", "loading the library…" } } };
-    };
-    let Some(editing) = open.read().clone() else { return rsx! {} };
-    let set = editing.set.clone();
-    let unsaved = editing.unsaved();
-    let resolved = set.resolve(&library.0.tracks);
+    // The last render of this set, to listen back to and to read the
+    // transitions off. Cleared whenever the tracklist changes under it.
+    let clip: Signal<Option<Clip>> = use_signal(|| None);
+    // Set when leaving was asked for and there is something unkept: the
+    // question is asked in the page rather than in a dialog, so the set is
+    // still visible behind it while you decide.
+    let mut leaving = use_signal(|| false);
 
     // Every edit is the same shape: change the copy on screen, re-cut the
     // mixes around the change, and leave the disk alone.
     let edit = move |(library, change): (Lib, Edit)| {
-        let (mut open, mut failed, mut picking, mut busy) = (open, failed, picking, busy);
+        let (mut open, mut failed, mut picking, mut busy, mut clip) = (open, failed, picking, busy, clip);
         let Some(current) = open.read().clone() else { return };
         busy.set(Some("re-cutting".into()));
         spawn(async move {
@@ -273,6 +275,8 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
                     });
                     failed.set(None);
                     picking.set(None);
+                    // The render was of the old tracklist.
+                    clip.set(None);
                 }
                 Err(err) => failed.set(Some(format!("{err:#}"))),
             }
@@ -280,7 +284,7 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
     };
 
     let hear = move |library: Lib| {
-        let (mut busy, mut failed) = (busy, failed);
+        let (mut busy, mut failed, mut clip) = (busy, failed, clip);
         let Some(current) = open.read().clone() else { return };
         busy.set(Some("rendering the set".into()));
         spawn(async move {
@@ -291,15 +295,36 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
             .await;
             busy.set(None);
             match made {
-                Ok(clip) => {
-                    let url = crate::server::url(&clip.path);
-                    super::player::title(&url, &clip.title);
+                Ok(made) => {
+                    let url = crate::server::url(&made.path);
+                    super::player::title(&url, &made.title);
                     super::player::play(&url, 0.0);
+                    clip.set(Some(made));
                 }
                 Err(err) => failed.set(Some(format!("{err:#}"))),
             }
         });
     };
+
+    // A card's Add has no gap in mind, so it goes on the end. Declared up
+    // here with the rest of the hooks: below the early returns it would be
+    // skipped while the library loads, and the hook order has to hold.
+    let mut search = use_context::<Search>();
+    use_effect(move || {
+        let Some(key) = search.wanted.read().clone() else { return };
+        let Some(library) = state.library.peek().clone() else { return };
+        search.wanted.set(None);
+        edit((library, Edit::Insert(usize::MAX, key)));
+    });
+
+    let Some(library) = state.library.read().clone() else {
+        return rsx! { div { class: "view", p { class: "muted", "loading the library…" } } };
+    };
+    let Some(editing) = open.read().clone() else { return rsx! {} };
+    let set = editing.set.clone();
+    let unsaved = editing.unsaved();
+
+    let resolved = set.resolve(&library.0.tracks);
 
     let keep = move |name: String, as_copy: bool| {
         let (mut open, mut failed, mut busy, mut saving_as) = (open, failed, busy, saving_as);
@@ -338,7 +363,17 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
     rsx! {
         div { class: "view",
             div { class: "row-flex editor-head",
-                button { class: "link", onclick: move |_| open.set(None), "← all sets" }
+                button {
+                    class: "link",
+                    onclick: move |_| {
+                        if unsaved && !set.tracks.is_empty() {
+                            leaving.set(true);
+                        } else {
+                            open.set(None);
+                        }
+                    },
+                    "← all sets"
+                }
                 input {
                     class: "set-name",
                     placeholder: "name this set",
@@ -372,6 +407,26 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
                     "Save"
                 }
                 button { class: "secondary", disabled: busy().is_some(), onclick: move |_| saving_as.set(!saving_as()), "Save as…" }
+            }
+
+            if leaving() {
+                div { class: "warning row-flex",
+                    span { "“{set.name}” has changes that are not kept." }
+                    span { class: "spacer" }
+                    button {
+                        class: "primary",
+                        onclick: {
+                            let name = set.name.clone();
+                            move |_| {
+                                leaving.set(false);
+                                keep(name.clone(), false);
+                            }
+                        },
+                        "Save it"
+                    }
+                    button { class: "danger", onclick: move |_| { leaving.set(false); open.set(None) }, "Leave without saving" }
+                    button { class: "ghost", onclick: move |_| leaving.set(false), "Stay" }
+                }
             }
 
             if saving_as() {
@@ -463,6 +518,17 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
                                             button { class: "icon-btn", title: "take it out of the set",
                                                 onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Remove(k))) }, {icons::remove()} }
                                         }
+                                        if let Some(at) = clip().and_then(|c| c.marks.get(k).map(|m| m.at)) {
+                                            button {
+                                                class: "ghost",
+                                                title: "play the render from where this track comes in",
+                                                onclick: {
+                                                    let url = clip().map(|c| crate::server::url(&c.path));
+                                                    move |_| if let Some(url) = &url { super::player::play(url, at) }
+                                                },
+                                                "▶ {work::clock(at)}"
+                                            }
+                                        }
                                         if let Some(step) = step {
                                             span { class: "{score_class(step.score)}", "{step.score:.2}" }
                                         } else {
@@ -476,6 +542,25 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
                                 GapLine { at: k + 1, picking, open, library: library.clone(), edit }
                             }
                         }
+                    }
+                }
+            }
+
+            if let Some(made) = clip() {
+                section { class: "panel",
+                    h3 {
+                        {icons::play()}
+                        "The rendered set"
+                        span { class: "spacer" }
+                        span { class: "muted small hint", "each track's entry marked, each transition shaded" }
+                    }
+                    Waveform {
+                        key: "{made.path.display()}",
+                        path: made.path.clone(),
+                        seconds: made.seconds,
+                        title: made.title.clone(),
+                        spans: made.marks.iter().filter_map(|m| m.until.map(|to| Span { from: m.at, to, kind: "into" })).collect::<Vec<_>>(),
+                        marks: made.marks.iter().map(|m| m.at).collect::<Vec<_>>(),
                     }
                 }
             }
@@ -497,9 +582,37 @@ struct Pick {
 #[component]
 fn GapLine(at: usize, picking: Signal<Option<Pick>>, open: Signal<Option<Editing>>, library: Lib, edit: EventHandler<(Lib, Edit)>) -> Element {
     let mut picking = picking;
+    let search = use_context::<Search>();
+    let mut over = use_signal(|| false);
     let open_here = picking() == Some(Pick { at, swapping: false });
+    // A card is in the air: every gap says it will take it, so there is
+    // somewhere visible to aim at.
+    let catching = search.dragging.read().is_some();
     rsx! {
-        li { class: if open_here { "gap open" } else { "gap" },
+        li {
+            class: match (open_here, catching, over()) {
+                (_, _, true) => "gap catching over",
+                (_, true, false) => "gap catching",
+                (true, _, _) => "gap open",
+                _ => "gap",
+            },
+            ondragover: move |event| {
+                event.prevent_default();
+                if !over() {
+                    over.set(true);
+                }
+            },
+            ondragleave: move |_| over.set(false),
+            ondrop: {
+                let library = library.clone();
+                move |event| {
+                    event.prevent_default();
+                    over.set(false);
+                    if let Some(key) = search.dragging.read().clone() {
+                        edit((library.clone(), Edit::Insert(at, key)));
+                    }
+                }
+            },
             button {
                 class: "gap-open",
                 title: "add a track here",

@@ -111,11 +111,42 @@ fn TrackPanel(lib: Lib, index: usize) -> Element {
         }
     });
 
+    // The cover is the catalogue's, not the analysis's, so it is asked for
+    // when the page opens and remembered after that.
+    let origin_key = track.origin.as_ref().map(|o| o.key());
+    let mut art: Signal<Option<String>> = use_signal(|| None);
+    use_effect({
+        let origin_key = origin_key.clone();
+        move || {
+            let Some(key) = origin_key.clone() else { return };
+            art.set(work::known_covers(std::slice::from_ref(&key)).get(&key).cloned());
+            spawn(async move {
+                let asking = vec![key.clone()];
+                let _ = work::blocking(move || work::fetch_covers(&asking)).await;
+                art.set(work::known_covers(std::slice::from_ref(&key)).get(&key).cloned());
+            });
+        }
+    });
+    let (artist, title) = match track.origin.as_ref() {
+        Some(origin) => (origin.item.artist.clone(), origin.item.title.clone()),
+        None => (String::new(), track.name()),
+    };
+
     rsx! {
         div { class: "view",
-            div {
-                div { class: "title", "{track.name()}" }
-                div { class: "muted small ellipsis", "{track.path.display()}" }
+            header { class: "detail-head",
+                div { class: "detail-art",
+                    if let Some(url) = art() {
+                        img { src: "{url}", alt: "" }
+                    }
+                }
+                div { class: "detail-of",
+                    div { class: "title", "{title}" }
+                    if !artist.is_empty() {
+                        div { class: "detail-artist", "{artist}" }
+                    }
+                    div { class: "muted small ellipsis selectable", "{track.path.display()}" }
+                }
             }
             div { class: "facts",
                 {super::vocals_badge(track)}

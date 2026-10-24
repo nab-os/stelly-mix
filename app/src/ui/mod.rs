@@ -4,6 +4,7 @@
 mod find;
 pub mod icons;
 mod player;
+mod search;
 mod sets;
 mod settings;
 mod sidebar;
@@ -121,6 +122,7 @@ pub fn App() -> Element {
         error: Signal::new(None),
         player: Player::new(),
     });
+    let _search = search::Search::provide();
     use_hook(move || state.sync());
     player::use_transport(state);
 
@@ -129,7 +131,9 @@ pub fn App() -> Element {
         div { class: "frame",
             sidebar::Sidebar {}
             div { class: "main",
+                search::SearchBar {}
                 Tabs {}
+                search::Results {}
                 match (state.view)() {
                     View::Track => rsx! { track::TrackView {} },
                     View::Sets => rsx! { sets::SetsView {} },

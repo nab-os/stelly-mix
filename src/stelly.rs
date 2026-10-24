@@ -155,6 +155,26 @@ impl Stelly {
         self.get("/api/mix/analyse", &[])
     }
 
+    /// The cover art of each of `ids`, where the server's catalogue has one.
+    ///
+    /// The mirrored library holds none: an entry is the analysis, and
+    /// artwork is the catalogue's. So it is asked for when it is about to be
+    /// shown, and whoever asks is expected to remember the answer.
+    pub fn covers(&self, ids: &[i64]) -> Result<Vec<(i64, String)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tracks: Vec<Value> = self.post("/api/space/tracks", &serde_json::json!({ "ids": ids }))?;
+        Ok(tracks
+            .iter()
+            .filter_map(|track| {
+                let id = track["track_id"].as_i64()?;
+                let image = track["image"].as_str().filter(|url| !url.is_empty())?;
+                Some((id, image.to_string()))
+            })
+            .collect())
+    }
+
     /// Stop the analysis the server is running, as it stands when it hears.
     /// Wants `admin`, as starting one does.
     pub fn stop(&self) -> Result<JobStatus> {

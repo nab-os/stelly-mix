@@ -221,6 +221,77 @@ pub fn render_set(loaded: &Loaded, plan: &Plan) -> Result<Clip> {
     })
 }
 
+/// Library tracks whose name holds every word of `words`, best match first
+/// by name length: a short name containing the words is more likely the one
+/// meant than a long one that happens to.
+pub fn search_library(loaded: &Loaded, words: &str, limit: usize) -> Vec<usize> {
+    let wanted: Vec<String> = words.split_whitespace().map(str::to_lowercase).collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<usize> = (0..loaded.tracks.len())
+        .filter(|&i| {
+            let name = loaded.tracks[i].name().to_lowercase();
+            wanted.iter().all(|word| name.contains(word.as_str()))
+        })
+        .collect();
+    hits.sort_by_key(|&i| loaded.tracks[i].name().len());
+    hits.truncate(limit);
+    hits
+}
+
+// ----------------------------------------------------------------- covers
+
+/// Cover art by the server's track id, remembered for as long as the window
+/// is open: the catalogue's artwork does not change under us, and asking
+/// again for a cover already on screen is a round trip for nothing.
+static COVERS: Mutex<Option<std::collections::HashMap<i64, Option<String>>>> = Mutex::new(None);
+
+/// The server's id out of an origin key, `stelly:<id>`.
+pub fn track_id(key: &str) -> Option<i64> {
+    key.strip_prefix(&format!("{}:", stelly_mix::stelly::SOURCE))?.parse().ok()
+}
+
+/// What is already known, without asking: for a first paint that does not
+/// wait on the network.
+pub fn known_covers(keys: &[String]) -> std::collections::HashMap<String, String> {
+    let held = COVERS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(held) = held.as_ref() else { return Default::default() };
+    keys.iter()
+        .filter_map(|key| {
+            let url = held.get(&track_id(key)?)?.clone()?;
+            Some((key.clone(), url))
+        })
+        .collect()
+}
+
+/// Fetch whatever of `keys` has no answer yet. A track the server has no
+/// art for is remembered as having none, so it is asked for once.
+pub fn fetch_covers(keys: &[String]) -> Result<()> {
+    let Some(server) = stelly() else { return Ok(()) };
+    let wanted: Vec<i64> = {
+        let held = COVERS.lock().unwrap_or_else(|e| e.into_inner());
+        let known = held.as_ref();
+        keys.iter()
+            .filter_map(|key| track_id(key))
+            .filter(|id| known.is_none_or(|k| !k.contains_key(id)))
+            .collect()
+    };
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let found = server.covers(&wanted)?;
+    let mut held = COVERS.lock().unwrap_or_else(|e| e.into_inner());
+    let held = held.get_or_insert_with(Default::default);
+    for id in &wanted {
+        held.insert(*id, None);
+    }
+    for (id, url) in found {
+        held.insert(id, Some(url));
+    }
+    Ok(())
+}
+
 // ------------------------------------------------------------------- sets
 
 pub fn sets() -> Result<stelly_mix::sets::Sets> {

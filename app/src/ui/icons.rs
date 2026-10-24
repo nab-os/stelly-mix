@@ -163,3 +163,7 @@ pub fn spark() -> Element {
         path { d: "M18.5 16.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z" }
     })
 }
+
+pub fn close() -> Element {
+    stroked(rsx! { path { d: "M6 6l12 12M18 6L6 18" } })
+}
