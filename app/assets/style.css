@@ -109,13 +109,44 @@ button .icon { width: 15px; height: 15px; }
    better with the extra pixel. */
 .tab .icon { width: 17px; height: 17px; }
 
-button.primary { background: var(--accent); color: var(--on-accent); font-weight: 600; }
-button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+/* Four weights, and they have to look like four things. Filled is the one
+   verb a panel is for; outlined is a verb beside it; bare text is a verb
+   that should not compete with either; red is a verb you do not undo.
+   Everything used to be a grey rectangle, so Listen and Open read as the
+   same button. */
 
-/* Destructive, and says so only once pointed at: a column of red buttons
+/* 1. The panel's own verb. One per panel. */
+button.primary {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+}
+button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+button.primary:active:not(:disabled) { transform: translateY(1px); box-shadow: none; }
+
+/* 2. Beside it: the outline carries the shape, not a fill. */
+button.secondary {
+  background: transparent;
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--row-hover);
+}
+button.secondary:hover:not(:disabled) { background: var(--row); box-shadow: inset 0 0 0 1px var(--muted); }
+
+/* 3. Quieter still: a verb that is one of many on a row. */
+button.ghost { background: transparent; color: var(--muted); }
+button.ghost:hover:not(:disabled) { background: var(--row); color: var(--text); }
+
+/* 4. Not undone, and says so only once pointed at: a column of red buttons
    reads as a wall of warnings rather than one. */
-button.danger { color: var(--danger); }
-button.danger:hover:not(:disabled) { background: var(--danger); color: var(--on-accent); }
+button.danger { background: transparent; color: var(--danger); box-shadow: inset 0 0 0 1px rgba(247, 118, 142, 0.4); }
+button.danger:hover:not(:disabled) { background: var(--danger); color: var(--on-accent); box-shadow: none; }
+
+/* The default, for anything that has not said which it is. */
+button:not(.primary):not(.secondary):not(.ghost):not(.danger):not(.chip):not(.icon-btn):not(.tab):not(.menu-item):not(.link) {
+  box-shadow: inset 0 0 0 1px var(--row-hover);
+  background: transparent;
+}
 
 /* A pill: a tag, or a toggle that is on or off. */
 .chip {
@@ -143,7 +174,7 @@ button.danger:hover:not(:disabled) { background: var(--danger); color: var(--on-
   color: var(--muted);
   flex: none;
 }
-.icon-btn:hover:not(:disabled) { background: var(--row-hover); color: var(--text); }
+.icon-btn:hover:not(:disabled) { background: var(--row-hover); color: var(--text); box-shadow: inset 0 0 0 1px var(--muted); }
 .icon-btn.active { color: var(--accent); }
 
 /* A verb that should not look like a button: dismissing, or going back. */
@@ -355,6 +386,63 @@ ol.list > .item::before {
   font-variant-numeric: tabular-nums;
   text-align: right;
 }
+
+/* The editor's head: the name is the biggest thing on it, because it is
+   what the set is. */
+.editor-head { gap: 10px; flex-wrap: wrap; }
+.set-name {
+  font-size: 16px;
+  font-weight: 600;
+  min-width: 220px;
+  background: transparent;
+  box-shadow: inset 0 -1px 0 var(--row);
+  border-radius: 0;
+  padding: 3px 2px;
+}
+.set-name:focus { box-shadow: inset 0 -2px 0 var(--accent); border-color: transparent; }
+.panel.inset { background: var(--bg); box-shadow: inset 0 0 0 1px var(--row); }
+
+/* The line between two tracks. Quiet until pointed at, because there is one
+   of these between every pair and a row of plus signs would shout. */
+.tracklist { position: relative; }
+.gap { list-style: none; height: 10px; display: flex; align-items: center; }
+.gap::before { content: none; }
+.gap-open {
+  width: 100%;
+  height: 10px;
+  padding: 0 0 0 48px;
+  gap: 6px;
+  justify-content: flex-start;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.gap-open .icon { width: 13px; height: 13px; }
+.gap-open span { opacity: 0.8; }
+.gap.open .gap-open,
+.gap:hover .gap-open,
+.gap-open:focus-visible { opacity: 1; }
+.gap.open .gap-open { color: var(--accent); }
+
+/* What to put there. */
+.picker { list-style: none; padding: 8px 8px 10px 48px; display: flex; flex-direction: column; gap: 8px; }
+.picker::before { content: none; }
+.picker .wide { flex: 1; }
+.picks { display: flex; flex-direction: column; gap: 2px; }
+.pick {
+  display: flex;
+  width: 100%;
+  gap: 10px;
+  justify-content: space-between;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+  padding: 4px 8px;
+}
+.pick:hover:not(:disabled) { background: var(--row-hover); }
 
 /* The alternatives for a slot, under the row they would replace. */
 .swap-panel {

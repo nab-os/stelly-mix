@@ -239,8 +239,10 @@ pub fn save_set(loaded: &Loaded, plan: &Plan, name: &str, planned: stelly_mix::s
     Ok(set)
 }
 
-/// Re-cut a set after an edit and keep it. The library's own sound scale is
-/// handed in rather than worked out again: it samples the whole library.
+/// Re-cut a set after an edit. Nothing is written: an edit is a change to
+/// what is on screen, and only Save puts it on disk. The library's own
+/// sound scale is handed in rather than worked out again, since working it
+/// out samples the whole library.
 pub fn edit_set(
     loaded: &Loaded,
     mut set: stelly_mix::sets::Set,
@@ -248,8 +250,75 @@ pub fn edit_set(
 ) -> Result<stelly_mix::sets::Set> {
     let stretch = set.planned.max_stretch;
     edit(&mut set, &loaded.tracks, stretch, loaded.scale)?;
-    sets()?.put(&set)?;
     Ok(set)
+}
+
+/// Plan `set`'s tracklist: from `first` if a track is picked, otherwise
+/// from the library's best match for the description it was given.
+///
+/// The set keeps its name and its id; only what is in it changes, and
+/// nothing is written.
+pub fn plan_into(loaded: &Loaded, mut set: stelly_mix::sets::Set, first: Option<usize>) -> Result<stelly_mix::sets::Set> {
+    let mut options = set.planned.options();
+    let wanted = set.planned.like.clone().filter(|text| !text.trim().is_empty());
+    if let Some(words) = &wanted {
+        options.like = Some(like(loaded, words)?);
+    }
+    let start = match (first, &options.like) {
+        (Some(at), _) => at,
+        (None, Some(scores)) => (0..loaded.tracks.len())
+            .filter(|&i| loaded.tracks[i].analysis.grid.as_ref().is_some_and(|g| g.steady))
+            .max_by(|&a, &b| scores[a].total_cmp(&scores[b]))
+            .context("the library is empty")?,
+        (None, None) => anyhow::bail!("pick a track on the left to start from, or describe how it should sound"),
+    };
+    let plan = stelly_mix::set::plan(&loaded.tracks, start, &options).context("that track has no tempo to hold a set at")?;
+    set.take_plan(&plan, &loaded.tracks)?;
+    Ok(set)
+}
+
+/// Tracks of the library whose name holds every word of `words`, as the
+/// sidebar filters, with how well each would sit in the gap at `at`.
+pub fn search_for_gap(
+    loaded: &Loaded,
+    set: &stelly_mix::sets::Set,
+    at: usize,
+    words: &str,
+    limit: usize,
+) -> Vec<(String, String, Option<f64>)> {
+    let fits: std::collections::HashMap<String, f64> =
+        set.fits_between(at, &loaded.tracks, set.planned.max_stretch, loaded.scale, 400).into_iter().collect();
+    let wanted: Vec<String> = words.split_whitespace().map(str::to_lowercase).collect();
+    let mut found: Vec<(String, String, Option<f64>)> = loaded
+        .tracks
+        .iter()
+        .filter_map(|track| {
+            let key = track.origin.as_ref()?.key();
+            if set.tracks.contains(&key) {
+                return None;
+            }
+            let name = track.name();
+            let haystack = name.to_lowercase();
+            wanted.iter().all(|word| haystack.contains(word.as_str())).then(|| (key.clone(), name, fits.get(&key).copied()))
+        })
+        .collect();
+    // What mixes best first, then the rest by name: a search is for finding
+    // one track, but if several match, the one that fits should lead.
+    found.sort_by(|a, b| match (a.2, b.2) {
+        (Some(x), Some(y)) => y.total_cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.1.to_lowercase().cmp(&b.1.to_lowercase()),
+    });
+    found.truncate(limit);
+    found
+}
+
+/// Keep `set` under a new name, as "Save as" does.
+pub fn save_set_as(set: &stelly_mix::sets::Set, name: &str) -> Result<stelly_mix::sets::Set> {
+    let copy = set.duplicate(name);
+    sets()?.put(&copy)?;
+    Ok(copy)
 }
 
 /// Keep a set up to `at` and plan the rest again. The description it was
@@ -260,13 +329,17 @@ pub fn replan_set(loaded: &Loaded, mut set: stelly_mix::sets::Set, at: usize) ->
         options.like = Some(like(loaded, &words)?);
     }
     set.replan_from(at, &loaded.tracks, options)?;
-    sets()?.put(&set)?;
     Ok(set)
 }
 
 /// What else could sit at `at` in `set`, best first.
 pub fn alternatives_for(loaded: &Loaded, set: &stelly_mix::sets::Set, at: usize, limit: usize) -> Vec<(String, f64)> {
     set.alternatives(at, &loaded.tracks, set.planned.max_stretch, loaded.scale, limit)
+}
+
+/// What would go in the gap before `at`, best first.
+pub fn fits_between(loaded: &Loaded, set: &stelly_mix::sets::Set, at: usize, limit: usize) -> Vec<(String, f64)> {
+    set.fits_between(at, &loaded.tracks, set.planned.max_stretch, loaded.scale, limit)
 }
 
 pub fn put_set(set: &stelly_mix::sets::Set) -> Result<()> {

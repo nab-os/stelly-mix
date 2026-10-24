@@ -191,6 +191,25 @@ impl Set {
         Resolved { plan: Plan { tracks, transitions, seconds, score }, missing }
     }
 
+    /// Take `plan` as this set's tracklist, keeping the set's own name and
+    /// id: planning again fills a set, it does not make a different one.
+    pub fn take_plan(&mut self, plan: &Plan, library: &[Track]) -> Result<()> {
+        self.tracks = plan
+            .tracks
+            .iter()
+            .map(|&at| {
+                let track = library.get(at).context("the plan names a track the library has not")?;
+                let origin = track.origin.as_ref().with_context(|| format!("{} came from no source", track.name()))?;
+                Ok(origin.key())
+            })
+            .collect::<Result<_>>()?;
+        self.steps = plan.transitions.iter().map(Step::of).collect();
+        self.seconds = plan.seconds;
+        self.mean_score = plan.mean_score();
+        self.modified = now();
+        Ok(())
+    }
+
     /// Re-cut the ways through the set after its tracks have moved.
     ///
     /// Each pair left next to each other takes the best transition there is
@@ -260,21 +279,46 @@ impl Set {
     /// into the one after: scoring every track in the library against both
     /// neighbours is two passes over thousands of tracks for a menu of six.
     pub fn alternatives(&self, at: usize, library: &[Track], max_stretch: f64, sound: SoundScale, limit: usize) -> Vec<(String, f64)> {
+        let resolved = self.resolved(library);
+        let before = at.checked_sub(1).and_then(|k| resolved.get(k).copied().flatten());
+        let after = resolved.get(at + 1).copied().flatten();
+        self.between(before, after, library, max_stretch, sound, limit)
+    }
+
+    /// What would go *between* the track at `at` and the one before it,
+    /// best first: the same question as `alternatives`, asked of a gap
+    /// rather than a slot, so nothing is displaced.
+    pub fn fits_between(&self, at: usize, library: &[Track], max_stretch: f64, sound: SoundScale, limit: usize) -> Vec<(String, f64)> {
+        let resolved = self.resolved(library);
+        let before = at.checked_sub(1).and_then(|k| resolved.get(k).copied().flatten());
+        let after = resolved.get(at).copied().flatten();
+        self.between(before, after, library, max_stretch, sound, limit)
+    }
+
+    fn resolved(&self, library: &[Track]) -> Vec<Option<usize>> {
+        self.tracks.iter().map(|key| index_of(library, key)).collect()
+    }
+
+    /// Tracks that mix well out of `before` and into `after`, best first.
+    fn between(
+        &self,
+        before: Option<usize>,
+        after: Option<usize>,
+        library: &[Track],
+        max_stretch: f64,
+        sound: SoundScale,
+        limit: usize,
+    ) -> Vec<(String, f64)> {
         const SHORTLIST: usize = 80;
         let Some(&first) = self.tracks.first().and_then(|key| index_of(library, key)).as_ref() else {
             return Vec::new();
         };
         let Some(master) = library[first].bpm() else { return Vec::new() };
         let ranking = crate::transitions::Options { max_stretch, tempo: Some(master), sound };
-        let resolved: Vec<Option<usize>> = self.tracks.iter().map(|key| index_of(library, key)).collect();
-        // Everything the set already holds, the slot's own track included:
-        // offering to swap a track for itself is a menu item that does
-        // nothing.
-        let held: Vec<usize> = resolved.iter().flatten().copied().collect();
+        // Everything the set already holds: offering one it is already
+        // playing is a menu item that makes the set worse.
+        let held: Vec<usize> = self.resolved(library).into_iter().flatten().collect();
         let free = |i: usize| !held.contains(&i);
-
-        let before = at.checked_sub(1).and_then(|k| resolved.get(k).copied().flatten());
-        let after = resolved.get(at + 1).copied().flatten();
 
         // Out of the track before, or — for the first slot — into the one
         // after, which is the only mix that slot has.
@@ -370,6 +414,14 @@ impl Set {
             return Ok(());
         }
         self.tracks.remove(at);
+        self.recut(library, max_stretch, sound)
+    }
+
+    /// Put `key` into the set at `at`, pushing what was there along, and
+    /// re-cut the mixes around the gap it went into.
+    pub fn insert(&mut self, at: usize, key: &str, library: &[Track], max_stretch: f64, sound: SoundScale) -> Result<()> {
+        let at = at.min(self.tracks.len());
+        self.tracks.insert(at, key.to_string());
         self.recut(library, max_stretch, sound)
     }
 
@@ -648,6 +700,31 @@ mod tests {
             assert!(seen.insert(key.clone()), "{key} plays twice");
         }
         assert_eq!(set.steps.len(), set.tracks.len() - 1);
+    }
+
+    #[test]
+    fn a_track_can_go_in_between_two_others() {
+        let library = mixable();
+        let mut set = cut(&[0, 1], &library);
+        set.insert(1, "stelly:3", &library, 0.06, SoundScale::of(&library)).unwrap();
+        assert_eq!(set.tracks, vec!["stelly:1", "stelly:3", "stelly:2"], "it went into the gap, not over a track");
+        assert_eq!(set.steps.len(), 2, "and both mixes around it were cut again");
+
+        // At the end is still a gap.
+        set.insert(99, "stelly:4", &library, 0.06, SoundScale::of(&library)).unwrap();
+        assert_eq!(set.tracks.last().unwrap(), "stelly:4");
+    }
+
+    #[test]
+    fn what_fits_between_two_tracks_leaves_out_what_is_already_playing() {
+        let library = mixable();
+        let set = cut(&[0, 1, 2], &library);
+        let offered = set.fits_between(1, &library, 0.06, SoundScale::of(&library), 5);
+        assert!(!offered.is_empty());
+        for (key, _) in &offered {
+            assert!(!set.tracks.contains(key), "{key} is already in the set");
+        }
+        assert!(offered.windows(2).all(|p| p[0].1 >= p[1].1), "best first");
     }
 
     #[test]

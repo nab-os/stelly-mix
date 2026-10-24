@@ -98,13 +98,6 @@ pub fn duplicate() -> Element {
     })
 }
 
-/// Renaming: a pencil.
-pub fn rename() -> Element {
-    stroked(rsx! {
-        path { d: "M4 20h4L19 9a2.1 2.1 0 0 0-3-3L5 17z" }
-        path { d: "M15 6l3 3" }
-    })
-}
 
 
 
@@ -123,13 +116,6 @@ pub fn remove() -> Element {
     stroked(rsx! { path { d: "M5 12h14" } })
 }
 
-/// Putting something else in this slot: one going out, another coming in.
-pub fn swap() -> Element {
-    stroked(rsx! {
-        path { d: "M4 8h13M14 5l3 3-3 3" }
-        path { d: "M20 16H7M10 13l-3 3 3 3" }
-    })
-}
 
 /// The server the music comes from.
 pub fn server() -> Element {
@@ -155,3 +141,25 @@ pub fn settings() -> Element {
     })
 }
 
+
+/// Adding something.
+pub fn plus() -> Element {
+    stroked(rsx! { path { d: "M12 5v14M5 12h14" } })
+}
+
+/// Keeping it: a disk, which is still what this means.
+pub fn save() -> Element {
+    stroked(rsx! {
+        path { d: "M5 4h11l3 3v13H5z" }
+        path { d: "M9 4v5h6V4" }
+        path { d: "M8 14h8v6H8z" }
+    })
+}
+
+/// Planning: the thing the engine does on its own.
+pub fn spark() -> Element {
+    stroked(rsx! {
+        path { d: "M12 3l1.8 5.2L19 10l-5.2 1.8L12 17l-1.8-5.2L5 10l5.2-1.8z" }
+        path { d: "M18.5 16.5l.7 2 2 .7-2 .7-.7 2-.7-2-2-.7 2-.7z" }
+    })
+}

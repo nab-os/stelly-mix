@@ -4,7 +4,6 @@
 mod find;
 pub mod icons;
 mod player;
-mod set;
 mod sets;
 mod settings;
 mod sidebar;
@@ -21,7 +20,6 @@ pub use player::Player;
 #[derive(Clone, Copy, PartialEq)]
 pub enum View {
     Track,
-    Set,
     Sets,
     Find,
     Settings,
@@ -134,7 +132,6 @@ pub fn App() -> Element {
                 Tabs {}
                 match (state.view)() {
                     View::Track => rsx! { track::TrackView {} },
-                    View::Set => rsx! { set::SetView {} },
                     View::Sets => rsx! { sets::SetsView {} },
                     View::Find => rsx! { find::FindView {} },
                     View::Settings => rsx! { settings::SettingsView {} },
@@ -161,8 +158,7 @@ fn Tabs() -> Element {
     rsx! {
         div { class: "tabs",
             {tab(View::Track, "Track", icons::track())}
-            {tab(View::Set, "Set", icons::set())}
-            {tab(View::Sets, "Sets", icons::sets())}
+            {tab(View::Sets, "Sets", icons::set())}
             {tab(View::Find, "Find", icons::find())}
             span { class: "spacer" }
             {tab(View::Settings, "Settings", icons::settings())}

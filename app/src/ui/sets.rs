@@ -1,15 +1,19 @@
-//! The sets kept: what has been planned and is worth keeping, and what to
-//! do with one.
+//! Sets: the ones you keep, and the one you are working on.
 //!
-//! A set is planned in the Set tab and lands here once saved. From here it
-//! is opened, renamed, copied, exported to whatever it will be played on,
-//! or forgotten.
+//! Planning and editing used to be two tabs, which meant a set existed in
+//! two places and belonged to neither. Here there is one: a list of what is
+//! kept, and an editor you reach by opening one or starting a new one. The
+//! planner is the top of that editor, because planning is how a set starts,
+//! not a different activity.
+//!
+//! Nothing here writes to disk until Save. An edit changes what is on
+//! screen; the badge by the name says whether that has been kept.
 
 use super::{icons, score_class, Lib, State};
 use crate::work;
 use dioxus::prelude::*;
 use stelly_mix::export::{self, Target};
-use stelly_mix::sets::Set;
+use stelly_mix::sets::{Planned, Set};
 
 /// How the list is ordered.
 #[derive(Clone, Copy, PartialEq)]
@@ -24,17 +28,46 @@ impl By {
     const ALL: [(By, &'static str); 4] = [(By::Made, "made"), (By::Name, "name"), (By::Length, "length"), (By::Score, "mixing")];
 }
 
+/// The set being worked on, and the copy that is on disk, if any.
+#[derive(Clone, PartialEq)]
+struct Editing {
+    set: Set,
+    /// `None` for a set that has never been kept.
+    saved: Option<Set>,
+}
+
+impl Editing {
+    /// Whether what is on screen differs from what is kept. Compared on what
+    /// a set *is* rather than the whole struct: every re-cut stamps
+    /// `modified`, so comparing those would read as changed the moment
+    /// anything ran at all.
+    fn unsaved(&self) -> bool {
+        match &self.saved {
+            None => true,
+            Some(saved) => saved.name != self.set.name || saved.tracks != self.set.tracks || saved.steps != self.set.steps,
+        }
+    }
+}
+
+/// What an edit does to a set.
+#[derive(Clone, PartialEq)]
+enum Edit {
+    Up(usize),
+    Down(usize),
+    Remove(usize),
+    Swap(usize, String),
+    Insert(usize, String),
+    Replan(usize),
+}
+
 #[component]
 pub fn SetsView() -> Element {
-    let state = use_context::<State>();
     let mut kept: Signal<Vec<Set>> = use_signal(Vec::new);
     let mut failed: Signal<Option<String>> = use_signal(|| None);
     let mut by = use_signal(|| By::Made);
     let mut filter = use_signal(String::new);
-    let mut open: Signal<Option<String>> = use_signal(|| None);
+    let mut open: Signal<Option<Editing>> = use_signal(|| None);
 
-    // Read them once the view is mounted, and again whenever something here
-    // changes one.
     let reload = move || {
         spawn(async move {
             match work::blocking(work::kept_sets).await {
@@ -48,18 +81,8 @@ pub fn SetsView() -> Element {
     };
     use_hook(reload);
 
-    if let Some(id) = open() {
-        let found = kept.read().iter().find(|set| set.id == id).cloned();
-        if let Some(set) = found {
-            return rsx! {
-                SetDetail {
-                    set: set,
-                    on_back: move |_| open.set(None),
-                    on_changed: move |_| reload(),
-                }
-            };
-        }
-        open.set(None);
+    if open.read().is_some() {
+        return rsx! { Editor { open, on_kept: move |_| reload() } };
     }
 
     let needle = filter().trim().to_lowercase();
@@ -79,137 +102,91 @@ pub fn SetsView() -> Element {
     rsx! {
         div { class: "view",
             div { class: "row-flex",
-                input {
-                    class: "field-filter",
-                    placeholder: "filter by name",
-                    value: "{filter}",
-                    oninput: move |event| filter.set(event.value()),
-                }
-                span { class: "spacer" }
+                input { placeholder: "filter by name", value: "{filter}", oninput: move |event| filter.set(event.value()) }
                 span { class: "eyebrow", "sort" }
                 div { class: "segmented",
                     for (which, label) in By::ALL {
-                        button {
-                            class: if by() == which { "active" } else { "" },
-                            onclick: move |_| by.set(which),
-                            "{label}"
-                        }
+                        button { class: if by() == which { "active" } else { "" }, onclick: move |_| by.set(which), "{label}" }
                     }
+                }
+                span { class: "spacer" }
+                button { class: "primary", onclick: move |_| open.set(Some(Editing { set: blank(), saved: None })),
+                    {icons::plus()}
+                    "New set"
                 }
             }
 
             if let Some(reason) = failed() {
-                p { class: "error selectable", "Could not read the sets: {reason}" }
+                p { class: "error small selectable", "Could not read the sets: {reason}" }
             }
 
             if kept.read().is_empty() && failed.read().is_none() {
                 div { class: "empty",
                     {icons::sets()}
                     p { "No sets yet." }
-                    p { class: "small", "Plan one in the Set tab, then keep it." }
+                    p { class: "small", "Start one, plan it from a track or a description, and keep it." }
                 }
             } else if shown.is_empty() {
-                div { class: "empty",
-                    p { "Nothing matches. Every word has to appear in the name." }
-                }
+                div { class: "empty", p { "Nothing matches. Every word has to appear in the name." } }
             } else {
                 div { class: "list",
                     for set in shown {
-                        SetRow {
-                            key: "{set.id}",
-                            set: set.clone(),
-                            on_open: move |id: String| open.set(Some(id)),
-                            on_changed: move |_| reload(),
-                        }
+                        SetRow { key: "{set.id}", set: set.clone(), open, on_changed: move |_| reload() }
                     }
                 }
-            }
-            if !state.library.read().is_some() {
-                p { class: "muted small", "The library is still loading; a set cannot be opened until it is." }
             }
         }
     }
 }
 
-/// One set in the list, and the menu of what can be done to it.
-#[component]
-fn SetRow(set: Set, on_open: EventHandler<String>, on_changed: EventHandler<()>) -> Element {
-    let state = use_context::<State>();
-    let mut renaming = use_signal(|| false);
-    let mut name = use_signal(|| set.name.clone());
-    let mut arming = use_signal(|| false);
+/// A set with nothing in it yet.
+fn blank() -> Set {
+    Set {
+        id: String::new(),
+        name: String::new(),
+        version: stelly_mix::sets::VERSION,
+        created: 0,
+        modified: 0,
+        tracks: Vec::new(),
+        steps: Vec::new(),
+        seconds: 0.0,
+        mean_score: 0.0,
+        planned: Planned::default(),
+    }
+}
 
+#[component]
+fn SetRow(set: Set, open: Signal<Option<Editing>>, on_changed: EventHandler<()>) -> Element {
+    let state = use_context::<State>();
+    let mut arming = use_signal(|| false);
     let id = set.id.clone();
-    // Takes the set rather than capturing it, so the closure stays Copy and
-    // both the blur and the Enter key can call it.
-    let commit = move |mut set: Set, wanted: String| {
-        // A copy of the signal, so the closure needs no `&mut` of its own
-        // and both handlers can call it.
-        let mut renaming = renaming;
-        renaming.set(false);
-        if wanted.is_empty() || wanted == set.name {
-            return;
-        }
-        set.rename(&wanted);
-        spawn(async move {
-            match work::blocking(move || work::put_set(&set)).await {
-                Ok(()) => on_changed.call(()),
-                Err(err) => state.fail(err),
-            }
-        });
-    };
 
     rsx! {
         div { class: "item set-row",
             span { class: "{score_class(set.mean_score)}", "{set.mean_score:.2}" }
-            div { class: "set-name",
-                if renaming() {
-                    input {
-                        value: "{name}",
-                        autofocus: true,
-                        onblur: {
-                            let set = set.clone();
-                            move |_| commit(set.clone(), name().trim().to_string())
-                        },
-                        onkeydown: {
-                            let set = set.clone();
-                            move |event: Event<KeyboardData>| match event.key() {
-                                Key::Enter => commit(set.clone(), name().trim().to_string()),
-                                Key::Escape => renaming.set(false),
-                                _ => {}
-                            }
-                        },
-                        oninput: move |event| name.set(event.value()),
-                    }
-                } else {
-                    div {
-                        class: "name ellipsis",
-                        title: "{set.name}",
-                        onclick: {
-                            let id = id.clone();
-                            move |_| on_open.call(id.clone())
-                        },
-                        "{set.name}"
-                    }
-                    div { class: "detail",
-                        "{set.tracks.len()} tracks · {set.clock()} · transitions averaging {set.mean_score:.2}"
-                    }
+            div {
+                div {
+                    class: "name ellipsis clickable",
+                    onclick: {
+                        let set = set.clone();
+                        move |_| open.set(Some(Editing { set: set.clone(), saved: Some(set.clone()) }))
+                    },
+                    "{set.name}"
                 }
+                div { class: "detail", "{set.tracks.len()} tracks · {set.clock()} · transitions averaging {set.mean_score:.2}" }
             }
             div { class: "actions on-hover",
                 button {
-                    class: "chip",
-                    title: "open this set",
+                    class: "secondary",
                     onclick: {
-                        let id = id.clone();
-                        move |_| on_open.call(id.clone())
+                        let set = set.clone();
+                        move |_| open.set(Some(Editing { set: set.clone(), saved: Some(set.clone()) }))
                     },
-                    "open"
+                    "Open"
                 }
-                button { class: "icon-btn", title: "rename it", onclick: move |_| renaming.set(true), {icons::rename()} }
                 button {
-                    class: "icon-btn",
-                    title: "make a copy to change without losing this one",
+                    class: "ghost",
+                    title: "a copy to change without losing this one",
                     onclick: {
                         let set = set.clone();
                         move |_| {
@@ -225,8 +202,7 @@ fn SetRow(set: Set, on_open: EventHandler<String>, on_changed: EventHandler<()>)
                     {icons::duplicate()}
                 }
                 button {
-                    class: if arming() { "chip danger armed" } else { "chip danger" },
-                    title: "forget this set",
+                    class: if arming() { "danger armed" } else { "danger" },
                     onclick: {
                         let id = id.clone();
                         move |_| {
@@ -243,160 +219,215 @@ fn SetRow(set: Set, on_open: EventHandler<String>, on_changed: EventHandler<()>)
                             });
                         }
                     },
-                    if arming() { "sure?" } else { "forget" }
+                    if arming() { "Sure?" } else { "Forget" }
                 }
             }
         }
     }
 }
 
-/// One set opened: what is in it, and handing it over.
+/// The set being worked on: plan it, shape it, keep it, hand it over.
 #[component]
-fn SetDetail(set: Set, on_back: EventHandler<()>, on_changed: EventHandler<()>) -> Element {
+fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
     let state = use_context::<State>();
-    let live = use_signal(|| set.clone());
-    let mut swapping: Signal<Option<usize>> = use_signal(|| None);
-    let mut offered: Signal<Vec<(String, f64)>> = use_signal(Vec::new);
-    let refused: Signal<Option<String>> = use_signal(|| None);
-    let mut target = use_signal(|| Target::Rekordbox);
-    let mut into = use_signal(|| {
-        std::env::var("HOME").map(|home| format!("{home}/Music/stelly-mix")).unwrap_or_else(|_| ".".into())
-    });
-    let mut exporting = use_signal(|| false);
-    let mut done: Signal<Option<String>> = use_signal(|| None);
+    let busy: Signal<Option<String>> = use_signal(|| None);
+    let failed: Signal<Option<String>> = use_signal(|| None);
+    let mut picking: Signal<Option<Pick>> = use_signal(|| None);
+    let mut saving_as = use_signal(|| false);
+    let mut as_name = use_signal(String::new);
 
     let Some(library) = state.library.read().clone() else {
-        return rsx! {
-            div { class: "view",
-                button { class: "link", onclick: move |_| on_back.call(()), "← all sets" }
-                p { class: "muted", "loading the library…" }
-            }
-        };
+        return rsx! { div { class: "view", p { class: "muted", "loading the library…" } } };
     };
-    let set = live();
+    let Some(editing) = open.read().clone() else { return rsx! {} };
+    let set = editing.set.clone();
+    let unsaved = editing.unsaved();
     let resolved = set.resolve(&library.0.tracks);
 
-    // Every edit is the same shape: change it, re-cut the mixes around the
-    // change, keep it. A refusal leaves what is on screen alone and says so.
-    let edit = move |library: Lib, change: EditKind| {
-        let (mut live, mut refused, mut swapping) = (live, refused, swapping);
-        let current = live();
+    // Every edit is the same shape: change the copy on screen, re-cut the
+    // mixes around the change, and leave the disk alone.
+    let edit = move |(library, change): (Lib, Edit)| {
+        let (mut open, mut failed, mut picking, mut busy) = (open, failed, picking, busy);
+        let Some(current) = open.read().clone() else { return };
+        busy.set(Some("re-cutting".into()));
         spawn(async move {
-            let done = work::blocking(move || {
-                work::edit_set(&library.0, current, move |set, tracks, stretch, scale| match change {
-                    EditKind::Up(at) => set.reorder(at, at.saturating_sub(1), tracks, stretch, scale),
-                    EditKind::Down(at) => set.reorder(at, at + 1, tracks, stretch, scale),
-                    EditKind::Remove(at) => set.remove(at, tracks, stretch, scale),
-                    EditKind::Swap(at, ref key) => set.replace(at, key, tracks, stretch, scale),
-                })
+            let done = work::blocking(move || match change {
+                Edit::Replan(at) => work::replan_set(&library.0, current.set.clone(), at),
+                other => work::edit_set(&library.0, current.set.clone(), move |set, tracks, stretch, scale| match other {
+                    Edit::Up(at) => set.reorder(at, at.saturating_sub(1), tracks, stretch, scale),
+                    Edit::Down(at) => set.reorder(at, at + 1, tracks, stretch, scale),
+                    Edit::Remove(at) => set.remove(at, tracks, stretch, scale),
+                    Edit::Swap(at, ref key) => set.replace(at, key, tracks, stretch, scale),
+                    Edit::Insert(at, ref key) => set.insert(at, key, tracks, stretch, scale),
+                    Edit::Replan(_) => unreachable!("taken above"),
+                }),
             })
             .await;
+            busy.set(None);
             match done {
-                Ok(kept) => {
-                    live.set(kept);
-                    refused.set(None);
-                    swapping.set(None);
-                    on_changed.call(());
+                Ok(next) => {
+                    open.with_mut(|held| {
+                        if let Some(held) = held {
+                            held.set = next;
+                        }
+                    });
+                    failed.set(None);
+                    picking.set(None);
                 }
-                Err(err) => refused.set(Some(format!("{err:#}"))),
+                Err(err) => failed.set(Some(format!("{err:#}"))),
             }
         });
     };
 
-    let export = {
-        let set = set.clone();
-        let library = library.clone();
-        move |_| {
-            if exporting() {
-                return;
-            }
-            exporting.set(true);
-            done.set(None);
-            let (set, library, folder, chosen) = (set.clone(), library.clone(), into(), target());
-            spawn(async move {
-                let options = export::Options { target: chosen, tracks: true, reference: true };
-                let written = work::blocking(move || {
-                    work::export_set(&set, &library.0, std::path::Path::new(&folder), &options, &|line| {
-                        eprintln!("{line}");
-                    })
-                })
-                .await;
-                exporting.set(false);
-                match written {
-                    Ok(written) => done.set(Some(format!(
-                        "{} · {} files, {:.1} GB",
-                        written.dir.display(),
-                        written.files.len(),
-                        written.bytes as f64 / 1e9
-                    ))),
-                    Err(err) => state.fail(err),
+    let hear = move |library: Lib| {
+        let (mut busy, mut failed) = (busy, failed);
+        let Some(current) = open.read().clone() else { return };
+        busy.set(Some("rendering the set".into()));
+        spawn(async move {
+            let made = work::blocking(move || {
+                let plan = current.set.resolve(&library.0.tracks).plan;
+                work::render_set(&library.0, &plan)
+            })
+            .await;
+            busy.set(None);
+            match made {
+                Ok(clip) => {
+                    let url = crate::server::url(&clip.path);
+                    super::player::title(&url, &clip.title);
+                    super::player::play(&url, 0.0);
                 }
-            });
+                Err(err) => failed.set(Some(format!("{err:#}"))),
+            }
+        });
+    };
+
+    let keep = move |name: String, as_copy: bool| {
+        let (mut open, mut failed, mut busy, mut saving_as) = (open, failed, busy, saving_as);
+        let Some(current) = open.read().clone() else { return };
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            failed.set(Some("A set wants a name before it can be kept.".into()));
+            return;
         }
+        busy.set(Some("keeping it".into()));
+        spawn(async move {
+            let kept = work::blocking(move || {
+                if as_copy || current.saved.is_none() {
+                    work::save_set_as(&current.set, &name)
+                } else {
+                    let mut set = current.set.clone();
+                    set.rename(&name);
+                    work::put_set(&set)?;
+                    Ok(set)
+                }
+            })
+            .await;
+            busy.set(None);
+            saving_as.set(false);
+            match kept {
+                Ok(saved) => {
+                    open.set(Some(Editing { set: saved.clone(), saved: Some(saved) }));
+                    failed.set(None);
+                    on_kept.call(());
+                }
+                Err(err) => failed.set(Some(format!("{err:#}"))),
+            }
+        });
     };
 
     rsx! {
         div { class: "view",
-            div { class: "row-flex",
-                button { class: "link", onclick: move |_| on_back.call(()), "← all sets" }
-            }
-            div {
-                div { class: "title", "{set.name}" }
-                div { class: "subtitle",
-                    "{set.tracks.len()} tracks · {set.clock()} · transitions averaging {set.mean_score:.2}"
-                }
-            }
-
-            if !resolved.missing.is_empty() {
-                p { class: "warning",
-                    "{resolved.missing.len()} of its tracks have left the library, and are left out."
-                }
-            }
-
-            section { class: "panel",
-                h3 { {icons::export()} "Hand it over" }
-                div { class: "form",
-                    div { class: "field",
-                        label { "To" }
-                        select {
-                            value: "{target().as_str()}",
-                            onchange: move |event| {
-                                if let Ok(chosen) = event.value().parse::<Target>() {
-                                    target.set(chosen);
-                                }
-                            },
-                            for option in Target::ALL {
-                                option { value: "{option.as_str()}", "{option.title()}" }
+            div { class: "row-flex editor-head",
+                button { class: "link", onclick: move |_| open.set(None), "← all sets" }
+                input {
+                    class: "set-name",
+                    placeholder: "name this set",
+                    value: "{set.name}",
+                    oninput: move |event| {
+                        let value = event.value();
+                        open.with_mut(|held| {
+                            if let Some(held) = held {
+                                held.set.name = value;
                             }
-                        }
-                    }
-                    div { class: "field wide",
-                        label { "Into" }
-                        input { value: "{into}", oninput: move |event| into.set(event.value()) }
-                    }
-                    button { class: "primary", disabled: exporting(), onclick: export,
-                        if exporting() { "exporting…" } else { "Export" }
-                    }
+                        });
+                    },
                 }
-                if let Some(caveat) = target().caveat() {
-                    p { class: "muted small", "{caveat}" }
+                if unsaved {
+                    span { class: "badge warm", title: "not kept yet", "unsaved" }
+                } else {
+                    span { class: "badge good", "kept" }
                 }
-                if let Some(where_to) = done() {
-                    p { class: "notice small selectable", "Written to {where_to}" }
+                span { class: "spacer" }
+                if let Some(what) = busy() {
+                    span { class: "row-flex", span { class: "working-dot" } span { class: "muted small", "{what}" } }
+                }
+                button {
+                    class: "primary",
+                    disabled: !unsaved || busy().is_some(),
+                    onclick: {
+                        let name = set.name.clone();
+                        move |_| keep(name.clone(), false)
+                    },
+                    {icons::save()}
+                    "Save"
+                }
+                button { class: "secondary", disabled: busy().is_some(), onclick: move |_| saving_as.set(!saving_as()), "Save as…" }
+            }
+
+            if saving_as() {
+                div { class: "panel inset row-flex",
+                    input {
+                        placeholder: "a name for the copy",
+                        value: "{as_name}",
+                        oninput: move |event| as_name.set(event.value()),
+                        onkeydown: move |event: Event<KeyboardData>| {
+                            if event.key() == Key::Enter {
+                                keep(as_name(), true);
+                            }
+                        },
+                    }
+                    button { class: "primary", onclick: move |_| keep(as_name(), true), "Keep a copy" }
+                    button { class: "ghost", onclick: move |_| saving_as.set(false), "Cancel" }
                 }
             }
+
+            if let Some(why) = failed() {
+                p { class: "error small selectable", "{why}" }
+            }
+            if !resolved.missing.is_empty() {
+                p { class: "warning", "{resolved.missing.len()} of its tracks have left the library, and are left out." }
+            }
+
+            Planner { open, busy, failed, library: library.clone() }
 
             section { class: "panel",
                 h3 {
                     {icons::set()}
-                    "The tracklist"
+                    "Tracklist"
                     span { class: "spacer" }
-                    span { class: "muted small hint", "reorder, swap or take one out; the mixes are cut again" }
+                    span { class: "muted small hint",
+                        if set.tracks.is_empty() {
+                            "plan one above, or add tracks to it below"
+                        } else {
+                            "{set.tracks.len()} tracks · {set.clock()} · averaging {set.mean_score:.2}"
+                        }
+                    }
+                    if !set.tracks.is_empty() {
+                        button {
+                            class: "secondary",
+                            disabled: busy().is_some(),
+                            title: "render the whole set and play it",
+                            onclick: {
+                                let library = library.clone();
+                                move |_| hear(library.clone())
+                            },
+                            {icons::play()}
+                            "Render & play"
+                        }
+                    }
                 }
-                if let Some(why) = refused() {
-                    p { class: "error small selectable", "{why}" }
-                }
-                ol { class: "list",
+                ol { class: "list tracklist",
+                    GapLine { at: 0, picking, open, library: library.clone(), edit }
                     for (k, &at) in resolved.plan.tracks.iter().enumerate() {
                         {
                             let track = &library.0.tracks[at];
@@ -411,79 +442,26 @@ fn SetDetail(set: Set, on_back: EventHandler<()>, on_changed: EventHandler<()>) 
                                             {super::vocals_badge(track)}
                                             span { "{track.bpm().unwrap_or(0.0):.1} BPM" }
                                             if let Some(key) = track.analysis.key.as_ref() { span { "· {key.camelot}" } }
-                                            if let Some(step) = step {
-                                                span { "· out at {work::clock(track.segments[step.out].start)}" }
-                                            }
+                                            if let Some(step) = step { span { "· out at {work::clock(track.segments[step.out].start)}" } }
                                         }
                                     }
                                     div { class: "actions",
                                         span { class: "on-hover row-flex",
-                                            button {
-                                                class: "icon-btn",
-                                                title: "move it earlier",
-                                                disabled: k == 0,
-                                                onclick: { let library = library.clone(); move |_| edit(library.clone(), EditKind::Up(k)) },
-                                                {icons::up()}
+                                            button { class: "icon-btn", title: "move it earlier", disabled: k == 0,
+                                                onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Up(k))) }, {icons::up()} }
+                                            button { class: "icon-btn", title: "move it later", disabled: last,
+                                                onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Down(k))) }, {icons::down()} }
+                                            button { class: "ghost", title: "put another track in this slot",
+                                                onclick: move |_| picking.set(match picking() {
+                                                    Some(Pick { at: a, swapping: true }) if a == k => None,
+                                                    _ => Some(Pick { at: k, swapping: true }),
+                                                }),
+                                                "Swap"
                                             }
-                                            button {
-                                                class: "icon-btn",
-                                                title: "move it later",
-                                                disabled: last,
-                                                onclick: { let library = library.clone(); move |_| edit(library.clone(), EditKind::Down(k)) },
-                                                {icons::down()}
-                                            }
-                                            button {
-                                                class: "icon-btn",
-                                                title: "put another track in this slot",
-                                                onclick: {
-                                                    let library = library.clone();
-                                                    move |_| {
-                                                        if swapping() == Some(k) {
-                                                            swapping.set(None);
-                                                            return;
-                                                        }
-                                                        swapping.set(Some(k));
-                                                        offered.set(Vec::new());
-                                                        let (library, current) = (library.clone(), live());
-                                                        spawn(async move {
-                                                            let found = work::blocking(move || {
-                                                                Ok(work::alternatives_for(&library.0, &current, k, 6))
-                                                            })
-                                                            .await
-                                                            .unwrap_or_default();
-                                                            offered.set(found);
-                                                        });
-                                                    }
-                                                },
-                                                {icons::swap()}
-                                            }
-                                            button {
-                                                class: "chip",
-                                                title: "keep the set up to here and plan the rest again",
-                                                disabled: last,
-                                                onclick: {
-                                                    let library = library.clone();
-                                                    move |_| {
-                                                        let (mut live, mut refused, current) = (live, refused, live());
-                                                        let library = library.clone();
-                                                        refused.set(Some("planning the rest again…".into()));
-                                                        spawn(async move {
-                                                            let done = work::blocking(move || work::replan_set(&library.0, current, k)).await;
-                                                            match done {
-                                                                Ok(kept) => { live.set(kept); refused.set(None); on_changed.call(()); }
-                                                                Err(err) => refused.set(Some(format!("{err:#}"))),
-                                                            }
-                                                        });
-                                                    }
-                                                },
-                                                "from here"
-                                            }
-                                            button {
-                                                class: "icon-btn",
-                                                title: "take it out of the set",
-                                                onclick: { let library = library.clone(); move |_| edit(library.clone(), EditKind::Remove(k)) },
-                                                {icons::remove()}
-                                            }
+                                            button { class: "ghost", title: "keep the set to here and plan the rest again", disabled: last,
+                                                onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Replan(k))) }, "Re-plan" }
+                                            button { class: "icon-btn", title: "take it out of the set",
+                                                onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Remove(k))) }, {icons::remove()} }
                                         }
                                         if let Some(step) = step {
                                             span { class: "{score_class(step.score)}", "{step.score:.2}" }
@@ -492,27 +470,155 @@ fn SetDetail(set: Set, on_back: EventHandler<()>, on_changed: EventHandler<()>) 
                                         }
                                     }
                                 }
-                                if swapping() == Some(k) {
-                                    li { class: "swap-panel",
-                                        if offered.read().is_empty() {
-                                            span { class: "muted small", "looking for what else fits here…" }
-                                        } else {
-                                            span { class: "muted small", "instead of this, mixing in and out:" }
-                                            for (key, score) in offered() {
-                                                button {
-                                                    class: "chip",
-                                                    title: "put it here",
-                                                    onclick: {
-                                                        let (library, key) = (library.clone(), key.clone());
-                                                        move |_| edit(library.clone(), EditKind::Swap(k, key.clone()))
-                                                    },
-                                                    "{name_of(&library, &key)} · {score:.2}"
-                                                }
-                                            }
-                                        }
-                                    }
+                                if picking() == Some(Pick { at: k, swapping: true }) {
+                                    Picker { at: k, swapping: true, open, picking, library: library.clone(), edit }
                                 }
+                                GapLine { at: k + 1, picking, open, library: library.clone(), edit }
                             }
+                        }
+                    }
+                }
+            }
+
+            Exporter { set: set.clone(), library: library.clone(), unsaved }
+        }
+    }
+}
+
+/// Which gap or slot the picker is open on.
+#[derive(Clone, Copy, PartialEq)]
+struct Pick {
+    at: usize,
+    /// Replacing what is there, rather than going in beside it.
+    swapping: bool,
+}
+
+/// The line between two tracks that opens a picker.
+#[component]
+fn GapLine(at: usize, picking: Signal<Option<Pick>>, open: Signal<Option<Editing>>, library: Lib, edit: EventHandler<(Lib, Edit)>) -> Element {
+    let mut picking = picking;
+    let open_here = picking() == Some(Pick { at, swapping: false });
+    rsx! {
+        li { class: if open_here { "gap open" } else { "gap" },
+            button {
+                class: "gap-open",
+                title: "add a track here",
+                onclick: move |_| picking.set(if open_here { None } else { Some(Pick { at, swapping: false }) }),
+                {icons::plus()}
+                span { "add a track here" }
+            }
+        }
+        if open_here {
+            Picker { at, swapping: false, open, picking, library: library.clone(), edit }
+        }
+    }
+}
+
+/// What to put in a gap or a slot: what fits there, and a search for when
+/// you already know what you want.
+#[component]
+fn Picker(
+    at: usize,
+    swapping: bool,
+    open: Signal<Option<Editing>>,
+    picking: Signal<Option<Pick>>,
+    library: Lib,
+    edit: EventHandler<(Lib, Edit)>,
+) -> Element {
+    let mut picking = picking;
+    let mut words = use_signal(String::new);
+    let mut found: Signal<Vec<(String, String, Option<f64>)>> = use_signal(Vec::new);
+    let mut fits: Signal<Vec<(String, f64)>> = use_signal(Vec::new);
+
+    let starting = library.clone();
+    use_hook(move || {
+        let lib = starting.clone();
+        spawn(async move {
+            let Some(current) = open.read().clone() else { return };
+            let offered = work::blocking(move || {
+                Ok(if swapping {
+                    work::alternatives_for(&lib.0, &current.set, at, 8)
+                } else {
+                    work::fits_between(&lib.0, &current.set, at, 8)
+                })
+            })
+            .await
+            .unwrap_or_default();
+            fits.set(offered);
+        });
+    });
+
+    let searching = library.clone();
+    let search = move |text: String| {
+        let lib = searching.clone();
+        spawn(async move {
+            let Some(current) = open.read().clone() else { return };
+            if text.trim().is_empty() {
+                found.set(Vec::new());
+                return;
+            }
+            let hits =
+                work::blocking(move || Ok(work::search_for_gap(&lib.0, &current.set, at, &text, 12))).await.unwrap_or_default();
+            found.set(hits);
+        });
+    };
+
+    // Takes the library each time rather than holding it, so the closure
+    // stays Copy and every pick in the list can call it.
+    let chosen = move |(library, key): (Lib, String)| {
+        edit((library, if swapping { Edit::Swap(at, key.clone()) } else { Edit::Insert(at, key) }));
+    };
+    let name_of = |key: &str| -> String {
+        library
+            .0
+            .tracks
+            .iter()
+            .find(|t| t.origin.as_ref().is_some_and(|o| o.key() == key))
+            .map(|t| t.name())
+            .unwrap_or_else(|| key.to_string())
+    };
+
+    rsx! {
+        li { class: "picker",
+            div { class: "row-flex",
+                input {
+                    class: "wide",
+                    placeholder: if swapping { "search for a track to put here" } else { "search for a track to add here" },
+                    value: "{words}",
+                    oninput: move |event| {
+                        let text = event.value();
+                        words.set(text.clone());
+                        search(text);
+                    },
+                }
+                button { class: "ghost", onclick: move |_| picking.set(None), "Cancel" }
+            }
+            div { class: "picks",
+                if !found.read().is_empty() {
+                    for (key, name, fit) in found() {
+                        button { class: "pick", onclick: {
+                                let (library, key) = (library.clone(), key.clone());
+                                move |_| chosen((library.clone(), key.clone()))
+                            },
+                            span { class: "ellipsis", "{name}" }
+                            if let Some(fit) = fit {
+                                span { class: "{score_class(fit)}", "{fit:.2}" }
+                            } else {
+                                span { class: "muted small", title: "too far in tempo to mix here", "–" }
+                            }
+                        }
+                    }
+                } else {
+                    span { class: "muted small",
+                        if fits.read().is_empty() { "looking for what fits here…" } else { "what fits here:" }
+                    }
+                    for (key, score) in fits() {
+                        button { class: "pick", onclick: {
+                                let (library, key) = (library.clone(), key.clone());
+                                move |_| chosen((library.clone(), key.clone()))
+                            },
+                            span { class: "ellipsis", "{name_of(&key)}" }
+                            span { class: "{score_class(score)}", "{score:.2}" }
                         }
                     }
                 }
@@ -521,22 +627,175 @@ fn SetDetail(set: Set, on_back: EventHandler<()>, on_changed: EventHandler<()>) 
     }
 }
 
-/// What an edit does to a set.
-#[derive(Clone)]
-enum EditKind {
-    Up(usize),
-    Down(usize),
-    Remove(usize),
-    Swap(usize, String),
+/// Planning, which is how a set starts and how it is filled again.
+#[component]
+fn Planner(open: Signal<Option<Editing>>, busy: Signal<Option<String>>, failed: Signal<Option<String>>, library: Lib) -> Element {
+    let state = use_context::<State>();
+    let Some(editing) = open.read().clone() else { return rsx! {} };
+    let planned = editing.set.planned.clone();
+    let empty = editing.set.tracks.is_empty();
+    let first = (state.selected)().and_then(|p| library.0.index_of(&p));
+    let first_name = first.map(|i| library.0.tracks[i].name());
+
+    let change = move |what: fn(&mut Planned, f64), value: f64| {
+        let mut open = open;
+        open.with_mut(|held| {
+            if let Some(held) = held {
+                what(&mut held.set.planned, value);
+            }
+        });
+    };
+    let number = move |label: &'static str, value: f64, step: &'static str, what: fn(&mut Planned, f64)| {
+        rsx! {
+            div { class: "field",
+                label { "{label}" }
+                input { r#type: "number", step: "{step}", value: "{value}",
+                    onchange: move |event| if let Ok(v) = event.value().parse::<f64>() { change(what, v) } }
+            }
+        }
+    };
+
+    let plan = move |library: Lib| {
+        let (mut open, mut busy, mut failed) = (open, busy, failed);
+        let Some(current) = open.read().clone() else { return };
+        busy.set(Some("planning".into()));
+        spawn(async move {
+            let made = work::blocking(move || work::plan_into(&library.0, current.set.clone(), first)).await;
+            busy.set(None);
+            match made {
+                Ok(next) => {
+                    open.with_mut(|held| {
+                        if let Some(held) = held {
+                            held.set = next;
+                        }
+                    });
+                    failed.set(None);
+                }
+                Err(err) => failed.set(Some(format!("{err:#}"))),
+            }
+        });
+    };
+
+    rsx! {
+        section { class: "panel",
+            h3 {
+                {icons::spark()}
+                "Plan"
+                span { class: "spacer" }
+                span { class: "muted small hint",
+                    match &first_name {
+                        Some(name) => format!("from {name}, picked on the left"),
+                        None => "pick a track on the left to start from, or describe it".to_string(),
+                    }
+                }
+            }
+            div { class: "form",
+                div { class: "field wide",
+                    label { "Sounding like" }
+                    input {
+                        placeholder: "e.g. dark rolling techno",
+                        value: "{planned.like.clone().unwrap_or_default()}",
+                        oninput: move |event| {
+                            let text = event.value();
+                            let mut open = open;
+                            open.with_mut(|held| {
+                                if let Some(held) = held {
+                                    held.set.planned.like = Some(text).filter(|t| !t.trim().is_empty());
+                                }
+                            });
+                        },
+                    }
+                }
+                {number("Minutes", planned.minutes, "1", |p, v| p.minutes = v.max(1.0))}
+                {number("± tempo %", planned.max_stretch * 100.0, "0.5", |p, v| p.max_stretch = (v / 100.0).clamp(0.005, 0.2))}
+                {number("Beam", planned.beam as f64, "1", |p, v| p.beam = (v as usize).clamp(1, 64))}
+                {number("Weakest mix", planned.min_transition, "0.05", |p, v| p.min_transition = v.clamp(0.0, 1.0))}
+                button {
+                    class: "primary",
+                    disabled: busy().is_some() || (first.is_none() && planned.like.is_none()),
+                    onclick: {
+                        let library = library.clone();
+                        move |_| plan(library.clone())
+                    },
+                    if empty { "Plan" } else { "Plan again" }
+                }
+            }
+            if !empty {
+                p { class: "muted small", "Planning again replaces the tracklist below." }
+            }
+        }
+    }
 }
 
-/// A track's name from its origin key, for the swap menu.
-fn name_of(library: &Lib, key: &str) -> String {
-    library
-        .0
-        .tracks
-        .iter()
-        .find(|track| track.origin.as_ref().is_some_and(|origin| origin.key() == key))
-        .map(|track| track.name())
-        .unwrap_or_else(|| key.to_string())
+/// Handing it over.
+#[component]
+fn Exporter(set: Set, library: Lib, unsaved: bool) -> Element {
+    let state = use_context::<State>();
+    let mut target = use_signal(|| Target::Rekordbox);
+    let mut into =
+        use_signal(|| std::env::var("HOME").map(|home| format!("{home}/Music/stelly-mix")).unwrap_or_else(|_| ".".into()));
+    let exporting = use_signal(|| false);
+    let done: Signal<Option<String>> = use_signal(|| None);
+
+    let export = move |set: Set, library: Lib| {
+        let (mut exporting, mut done) = (exporting, done);
+        if exporting() {
+            return;
+        }
+        exporting.set(true);
+        done.set(None);
+        let (folder, chosen) = (into(), target());
+        spawn(async move {
+            let options = export::Options { target: chosen, tracks: true, reference: true };
+            let written = work::blocking(move || {
+                work::export_set(&set, &library.0, std::path::Path::new(&folder), &options, &|line| eprintln!("{line}"))
+            })
+            .await;
+            exporting.set(false);
+            match written {
+                Ok(w) => done.set(Some(format!("{} · {} files, {:.1} GB", w.dir.display(), w.files.len(), w.bytes as f64 / 1e9))),
+                Err(err) => state.fail(err),
+            }
+        });
+    };
+
+    rsx! {
+        section { class: "panel",
+            h3 { {icons::export()} "Hand it over" }
+            div { class: "form",
+                div { class: "field",
+                    label { "To" }
+                    select {
+                        value: "{target().as_str()}",
+                        onchange: move |event| if let Ok(c) = event.value().parse::<Target>() { target.set(c) },
+                        for option in Target::ALL {
+                            option { value: "{option.as_str()}", "{option.title()}" }
+                        }
+                    }
+                }
+                div { class: "field wide",
+                    label { "Into" }
+                    input { value: "{into}", oninput: move |event| into.set(event.value()) }
+                }
+                button {
+                    class: "secondary",
+                    disabled: exporting() || set.tracks.is_empty(),
+                    onclick: {
+                        let (set, library) = (set.clone(), library.clone());
+                        move |_| export(set.clone(), library.clone())
+                    },
+                    if exporting() { "exporting…" } else { "Export" }
+                }
+            }
+            if let Some(caveat) = target().caveat() {
+                p { class: "muted small", "{caveat}" }
+            }
+            if unsaved && !set.tracks.is_empty() {
+                p { class: "muted small", "Exports what is on screen, kept or not." }
+            }
+            if let Some(where_to) = done() {
+                p { class: "told", "Written to {where_to}" }
+            }
+        }
+    }
 }
