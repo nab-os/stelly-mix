@@ -123,9 +123,15 @@ impl Stelly {
             .map(|s| s.id)
             .filter(|id| library.by_origin(&format!("{SOURCE}:{id}")).is_none())
             .collect();
+        self.bring(library, &missing, report)
+    }
+
+    /// The server's entries for `ids` into the library, as `sync` brings
+    /// them; those it has none for are passed over. How many came.
+    pub fn bring(&self, library: &Library, ids: &[i64], report: &dyn Fn(usize, usize)) -> Result<usize> {
         let mut done = 0;
-        report(0, missing.len());
-        for chunk in missing.chunks(CHUNK) {
+        report(0, ids.len());
+        for chunk in ids.chunks(CHUNK) {
             let entries: Vec<Entry> = self.post("/api/mix/tracks", &EntriesRequest { ids: chunk.to_vec() })?;
             for mut entry in entries {
                 if !adopt(&mut entry) {
@@ -134,9 +140,17 @@ impl Stelly {
                 library.put(&entry.track)?;
                 done += 1;
             }
-            report(done, missing.len());
+            report(done, ids.len());
         }
         Ok(done)
+    }
+
+    /// What the family liked on Stelly after `since`, Unix seconds, newest
+    /// first: liked tracks and the tracks of liked albums. The server queues
+    /// each for its mix analysis as it is liked, so most are analysed by the
+    /// time anyone sits down to mix them.
+    pub fn liked(&self, since: i64) -> Result<Vec<Liked>> {
+        self.get("/api/mix/liked", &[("since", since.to_string())])
     }
 
     /// Have the server analyse `selection` for mixing, in the background.
@@ -313,6 +327,31 @@ fn config_dir() -> Option<PathBuf> {
     Some(config.join("stelly-mix"))
 }
 
+/// A track liked on Stelly, as `/api/mix/liked` lists it.
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
+pub struct Liked {
+    pub track_id: i64,
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub artist: String,
+    /// Unix seconds, the latest when several liked it.
+    pub liked_at: i64,
+    /// Who liked it, by name.
+    #[serde(default)]
+    pub by: Vec<String>,
+    /// Whether the server has its mix analysis yet.
+    #[serde(default)]
+    pub analysed: bool,
+}
+
+impl Liked {
+    /// Its key in the library.
+    pub fn key(&self) -> String {
+        format!("{SOURCE}:{}", self.track_id)
+    }
+}
+
 /// File an entry as the server's own track, under the id it was asked for:
 /// one analysed before 2.0 comes back naming whichever provider had the
 /// audio, though its id was already the server's. Whether it can be filed at
@@ -399,6 +438,16 @@ mod tests {
         assert_eq!(from_file(&file, "STELLY_TOKEN").as_deref(), Some("quoted"));
         assert_eq!(from_file(&file, "STELLY_SERVER").as_deref(), Some("single"));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_like_reads_as_the_server_lists_it() {
+        let listed = r#"[{"track_id":16629,"title":"Weekend Wars","artist":"MGMT","liked_at":1792868215,"by":["owner"],"analysed":true},
+                         {"track_id":7,"liked_at":5}]"#;
+        let liked: Vec<Liked> = serde_json::from_str(listed).unwrap();
+        assert_eq!((liked[0].key().as_str(), liked[0].title.as_str(), liked[0].analysed), ("stelly:16629", "Weekend Wars", true));
+        // A server that says less still reads.
+        assert_eq!((liked[1].by.len(), liked[1].analysed), (0, false));
     }
 
     /// An entry as the server hands it over, from `source`.

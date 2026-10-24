@@ -35,6 +35,7 @@ enum Command {
     Compact(Compact),
     RenameSource(RenameSource),
     Sync(Sync),
+    Liked(Liked),
     ServerAnalyse(ServerAnalyse),
     ServerStop(ServerStop),
     Sets(SetsCommand),
@@ -65,6 +66,17 @@ struct ServerStop {}
 /// Bring Stelly's server's mix analyses into the library: STELLY_SERVER and
 /// STELLY_TOKEN say where it is.
 struct Sync {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "liked")]
+/// What was liked on Stelly lately, newest first, with its tempo and key
+/// once its mix analysis is here: what there is to mix. Brings in those the
+/// server has analysed since the last sync.
+struct Liked {
+    /// how many days back (default 7)
+    #[argh(option, default = "7")]
+    days: i64,
+}
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "vocals")]
@@ -331,6 +343,30 @@ pub fn run(sources: Vec<Box<dyn Source>>) -> Result<()> {
                 }
             })?;
             eprintln!("brought {done} entries in {:.0}s", started.elapsed().as_secs_f64());
+        }
+        Command::Liked(args) => {
+            let stelly = crate::stelly::Stelly::from_env().context("set STELLY_SERVER and STELLY_TOKEN to ask Stelly's server")?;
+            let library = Library::open(Library::default_dir())?;
+            let since = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_secs() as i64 - args.days * 24 * 60 * 60;
+            let liked = stelly.liked(since)?;
+            let missing: Vec<i64> = liked.iter().filter(|l| l.analysed && library.by_origin(&l.key()).is_none()).map(|l| l.track_id).collect();
+            if !missing.is_empty() {
+                let brought = stelly.bring(&library, &missing, &|_, _| {})?;
+                eprintln!("brought {brought} new analyses");
+            }
+            for like in &liked {
+                let facts = match library.by_origin(&like.key()) {
+                    Some(track) => {
+                        let bpm = track.bpm().map(|bpm| format!("{bpm:.0}")).unwrap_or_default();
+                        let key = track.analysis.key.as_ref().map(|k| k.camelot.clone()).unwrap_or_default();
+                        format!("{bpm:>4} {key:>3}")
+                    }
+                    None => "analysing".to_string(),
+                };
+                println!("{:>9}  {}  {} - {}  ({})", facts, like.key(), like.artist, like.title, like.by.join(", "));
+            }
+            let waiting = liked.iter().filter(|l| library.by_origin(&l.key()).is_none()).count();
+            eprintln!("{} liked in {} days, {waiting} not analysed yet", liked.len(), args.days);
         }
         Command::RenameSource(args) => {
             let library = Library::open(Library::default_dir())?;
