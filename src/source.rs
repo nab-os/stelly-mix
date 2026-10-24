@@ -72,6 +72,14 @@ pub trait Source: Send + Sync {
         self.fetch(item, cache)
     }
 
+    /// The item's analysis from the service itself, made there if need be,
+    /// rather than here from its audio: a server that analyses for mixing
+    /// already has, or soon will. None, by default and from a service that
+    /// cannot, and the track is analysed here.
+    fn analysed(&self, _item: &Item) -> Result<Option<Track>> {
+        Ok(None)
+    }
+
     /// What the library remembers the item as, to fetch it again: by
     /// default this source and the item. A source whose tracks are another's
     /// says so, so that the same track from either is one entry.
@@ -220,6 +228,14 @@ impl Sources {
         if let Some(track) = library.by_origin(&origin.key()) {
             return Ok(track);
         }
+        if let Pending::Item(source, item) = &pending {
+            if let Some(mut track) = source.analysed(item)? {
+                // Filed under what it was asked as, whatever the service calls it.
+                track.origin = Some(origin);
+                library.put(&track)?;
+                return Ok(track);
+            }
+        }
         let had = pending.cached();
         let file = pending.fetch_for_analysis()?;
         let track = library.index_origin(&file, origin)?;
@@ -337,6 +353,50 @@ mod tests {
             }
             Ok(cache.join(format!("{}.flac", item.file_stem())))
         }
+    }
+
+    /// A service that analyses for itself, and never hands audio over.
+    struct Analyses;
+
+    impl Source for Analyses {
+        fn name(&self) -> &str {
+            "analyses"
+        }
+        fn resolve(&self, reference: &str) -> Result<Vec<Item>> {
+            Ok(vec![Item { id: reference.into(), artist: "MGMT".into(), title: "Kids".into(), seconds: None }])
+        }
+        fn search(&self, _: &str, _: usize) -> Result<Vec<Item>> {
+            Ok(Vec::new())
+        }
+        fn fetch(&self, _: &Item, _: &Path) -> Result<PathBuf> {
+            bail!("fetched, when the service had the analysis")
+        }
+        fn analysed(&self, _: &Item) -> Result<Option<Track>> {
+            // Named as the service files it, which is not how it was asked for.
+            let track = serde_json::json!({
+                "path": "MGMT - Kids", "size": 0, "modified": 0, "version": crate::library::VERSION,
+                "origin": { "source": "elsewhere", "item": { "id": "x", "artist": "MGMT", "title": "Kids" } },
+                "analysis": {
+                    "seconds": 300.0, "grid": null, "key": null, "loudness": null,
+                    "beats": [], "downbeats": [], "downbeat_confidence": 0.0, "phrases": [], "sections": []
+                },
+                "segments": []
+            });
+            Ok(Some(serde_json::from_value(track)?))
+        }
+    }
+
+    #[test]
+    fn a_service_that_analyses_is_asked_rather_than_fetched_from() {
+        let dir = std::env::temp_dir().join(format!("stelly-mix-asked-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let library = Library::open(dir.clone()).unwrap();
+        let sources = Sources::new(vec![Box::new(Analyses)]);
+        let track = sources.track(&library, "analyses:7").unwrap();
+        assert_eq!(track.origin.unwrap().key(), "analyses:7");
+        // Kept, under the key it was asked by: the next ask is the library's.
+        assert!(library.by_origin("analyses:7").is_some());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
