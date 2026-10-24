@@ -28,6 +28,13 @@ const ENERGY: f64 = 0.1;
 const KEY_STRENGTH: f64 = 0.5;
 /// A loudness step this large in either direction scores nothing, LU.
 const ENERGY_RANGE: f64 = 6.0;
+/// Two people singing at once, over the phrase the mix happens on. The ear
+/// follows a voice and cannot follow two, so this is weighed heavily: at
+/// its worst it costs more than a whole key step.
+const CLASH: f64 = 0.25;
+/// A voice on one side of a mix is how a great many of them are made, so
+/// mixing away from a singer mid-phrase is worth only a little against it.
+const INTERRUPTS: f64 = 0.08;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -294,8 +301,20 @@ pub fn from_allowed(
 
     // Then sound scored against the library's best pairs: within a genre
     // every pair is 0.93–0.96, so the raw cosine would hardly count.
+    //
+    // Voices come off the end: a track nobody has listened to scores as it
+    // always did, so the ranking only changes where something is known.
     for (transition, fixed, energy_score) in &mut best {
-        transition.score = SOUND * options.sound.score(transition.sound) + *fixed + ENERGY * *energy_score;
+        let out_voice = playing.vocals.as_ref().map_or(0.0, |heard| heard.how_much(transition.out));
+        let into_voice = others
+            .get(transition.to)
+            .and_then(|next| next.vocals.as_ref())
+            .map_or(0.0, |heard| heard.how_much(transition.into));
+        let clash = out_voice * into_voice;
+        let interrupts = out_voice.max(into_voice);
+        transition.score = SOUND * options.sound.score(transition.sound) + *fixed + ENERGY * *energy_score
+            - CLASH * clash
+            - INTERRUPTS * interrupts;
     }
     let mut best: Vec<Transition> = best.into_iter().map(|b| b.0).collect();
     best.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -407,6 +426,7 @@ pub(crate) mod tests {
             version: crate::library::VERSION,
             bpm_range: crate::tempo::DJ_BPM,
             origin: None,
+            vocals: None,
             fingerprint: Default::default(),
             analysis: Analysis {
                 seconds,
@@ -421,6 +441,41 @@ pub(crate) mod tests {
             },
             segments,
         }
+    }
+
+    /// A track with a voice in every phrase, for weighing clashes.
+    fn singing(mut track: Track) -> Track {
+        let phrases = vec![crate::vocals::SPEAKS + 0.3; track.segments.len()];
+        track.vocals = Some(crate::vocals::Heard { version: crate::vocals::VERSION, track: phrases[0], phrases });
+        track
+    }
+
+    #[test]
+    fn two_voices_at_once_score_below_one_or_none() {
+        let options = Options { sound: SoundScale { mean: 0.9, spread: 0.05 }, ..Default::default() };
+        let best = |a: Track, b: Track| from(&a, std::slice::from_ref(&b), &options).first().map(|t| t.score);
+
+        let quiet = track("a", &[0, 1, 2, 3, 4, 5], false);
+        let other = track("b", &[0, 1, 2, 3, 4, 5], false);
+        let neither = best(quiet.clone(), other.clone()).expect("a way across");
+        let one = best(singing(quiet.clone()), other.clone()).expect("a way across");
+        let both = best(singing(quiet), singing(other)).expect("a way across");
+
+        assert!(one < neither, "mixing away from a singer costs a little: {one} vs {neither}");
+        assert!(both < one, "two of them at once costs much more: {both} vs {one}");
+        assert!(
+            (neither - both) > (neither - one) * 2.0,
+            "the clash is the heavy part, not the interruption"
+        );
+    }
+
+    #[test]
+    fn a_track_nobody_listened_to_scores_as_it_always_did() {
+        let options = Options { sound: SoundScale { mean: 0.9, spread: 0.05 }, ..Default::default() };
+        let (a, b) = (track("a", &[0, 1, 2, 3], false), track("b", &[0, 1, 2, 3], false));
+        assert!(a.vocals.is_none() && b.vocals.is_none());
+        let scored = from(&a, std::slice::from_ref(&b), &options);
+        assert!(!scored.is_empty(), "no voices known is not a reason to refuse a mix");
     }
 
     #[test]

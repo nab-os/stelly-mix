@@ -38,6 +38,7 @@ enum Command {
     ServerAnalyse(ServerAnalyse),
     ServerStop(ServerStop),
     Sets(SetsCommand),
+    Vocals(Vocals),
     Export(Export),
 }
 
@@ -64,6 +65,12 @@ struct ServerStop {}
 /// Bring Stelly's server's mix analyses into the library: STELLY_SERVER and
 /// STELLY_TOKEN say where it is.
 struct Sync {}
+
+#[derive(FromArgs)]
+#[argh(subcommand, name = "vocals")]
+/// Listen through the library for singing, and keep what was heard: a badge
+/// on a track's line, and mixes cut where the voice is not.
+struct Vocals {}
 
 #[derive(FromArgs)]
 #[argh(subcommand, name = "sets")]
@@ -329,6 +336,21 @@ pub fn run(sources: Vec<Box<dyn Source>>) -> Result<()> {
             let library = Library::open(Library::default_dir())?;
             let done = library.rename_source(&args.from, &args.to)?;
             eprintln!("{done} entries from {} are {}'s now", args.from, args.to);
+        }
+        Command::Vocals(_) => {
+            let library = Library::open(Library::default_dir())?;
+            let started = Instant::now();
+            let done = library.listen(&|done, total| {
+                if total > 0 && done == 0 {
+                    eprintln!("listening to {total} tracks");
+                } else if done > 0 {
+                    eprintln!("{done} listened to");
+                }
+            })?;
+            match done {
+                0 => eprintln!("every track has been listened to already"),
+                n => eprintln!("listened to {n} tracks in {:.0}s", started.elapsed().as_secs_f64()),
+            }
         }
         Command::Sets(_) => {
             let sets = crate::sets::Sets::open(crate::sets::Sets::default_dir())?;

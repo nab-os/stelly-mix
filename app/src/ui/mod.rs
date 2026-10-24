@@ -170,6 +170,25 @@ fn Tabs() -> Element {
     }
 }
 
+/// The "vocals" badge for a track, when something has been heard in it.
+///
+/// Only shown where there is singing: a track with none says nothing, and a
+/// track nobody has listened to says nothing either, which are different
+/// things and neither is worth a badge. The title says it is a guess,
+/// because it is one.
+pub fn vocals_badge(track: &stelly_mix::library::Track) -> Element {
+    let Some(heard) = track.vocals.as_ref().filter(|heard| heard.speaks()) else {
+        return rsx! {};
+    };
+    rsx! {
+        span {
+            class: "badge warm vocals",
+            title: "there is singing in this, as CLAP hears it: a guess, not a tag ({heard.track:+.2})",
+            "vocals"
+        }
+    }
+}
+
 /// A transition or a match's score as a colour: good, middling, poor. Sound
 /// is scored against each track's closest matches, so 0.6 is already among
 /// the best a library offers.

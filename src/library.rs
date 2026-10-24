@@ -35,6 +35,12 @@ pub struct Track {
     pub origin: Option<Origin>,
     pub analysis: Analysis,
     pub segments: Vec<Segment>,
+    /// Whether there is a voice in it, phrase by phrase, when it has been
+    /// listened for. Absent on an entry written before it was, and on one
+    /// nobody has run `vocals` over yet: that is a track nothing is known
+    /// about, not a track with no singing in it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vocals: Option<crate::vocals::Heard>,
     /// What tells one recording from another, worked out once when asked.
     #[serde(skip)]
     pub fingerprint: std::sync::OnceLock<Fingerprint>,
@@ -232,6 +238,36 @@ impl Library {
         Ok(done)
     }
 
+    /// Listen through the library for voices, and keep what was heard in
+    /// each entry: how many were listened to.
+    ///
+    /// Done over the whole library at once because the text tower is half a
+    /// gigabyte to load and the scoring itself is a dot product; and kept,
+    /// because nothing about a track changes to make it worth hearing twice.
+    pub fn listen(&self, report: &dyn Fn(usize, usize)) -> Result<usize> {
+        let tracks = self.all()?;
+        let todo: Vec<Track> = tracks
+            .into_iter()
+            .filter(|track| track.vocals.as_ref().is_none_or(|heard| heard.version != crate::vocals::VERSION))
+            .filter(|track| !track.segments.is_empty())
+            .collect();
+        report(0, todo.len());
+        if todo.is_empty() {
+            return Ok(0);
+        }
+        let ear = crate::vocals::Ear::load()?;
+        let mut done = 0;
+        for mut track in todo {
+            track.vocals = Some(ear.track(&track));
+            self.put(&track)?;
+            done += 1;
+            if done % 50 == 0 {
+                report(done, done);
+            }
+        }
+        Ok(done)
+    }
+
     fn entries(&self) -> Result<Vec<PathBuf>> {
         Ok(std::fs::read_dir(&self.dir)?
             .filter_map(|e| Some(e.ok()?.path()))
@@ -290,6 +326,7 @@ fn index_pcm(pcm: &stelly_audio::decode::Pcm, path: PathBuf, options: &Options, 
         origin: None,
         analysis,
         segments,
+        vocals: None,
         fingerprint: Default::default(),
     })
 }

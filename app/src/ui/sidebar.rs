@@ -25,7 +25,7 @@ pub fn Sidebar() -> Element {
 
     let library = (state.library)();
     let words: Vec<String> = filter().to_lowercase().split_whitespace().map(str::to_string).collect();
-    let rows: Vec<(String, String, String, std::path::PathBuf)> = match &library {
+    let rows: Vec<(String, String, String, bool, std::path::PathBuf)> = match &library {
         None => Vec::new(),
         Some(lib) => {
             let mut tracks: Vec<&stelly_mix::library::Track> = lib
@@ -47,7 +47,8 @@ pub fn Sidebar() -> Element {
                 .map(|t| {
                     let bpm = t.bpm().map_or("–".into(), |b| format!("{b:.1}"));
                     let key = t.analysis.key.as_ref().map_or("–".into(), |k| k.camelot.clone());
-                    (t.name(), bpm, key, t.path.clone())
+                    let sings = t.vocals.as_ref().is_some_and(|heard| heard.speaks());
+                    (t.name(), bpm, key, sings, t.path.clone())
                 })
                 .collect()
         }
@@ -113,13 +114,22 @@ pub fn Sidebar() -> Element {
                 }
             }
             div { class: "tracks",
-                for (name, bpm, key, path) in rows.into_iter().take(SHOWN) {
+                for (name, bpm, key, sings, path) in rows.into_iter().take(SHOWN) {
                     div {
                         key: "{path.display()}",
                         class: if selected.as_ref() == Some(&path) { "track-row selected" } else { "track-row" },
                         title: "{path.display()}",
                         onclick: move |_| state.open(path.clone()),
                         span { class: "ellipsis", "{name}" }
+                        if sings {
+                            // The word, not the icon: at this size a glyph
+                            // for a voice is a glyph for anything.
+                            span {
+                                class: "badge warm vocals",
+                                title: "there is singing in this, as CLAP hears it: a guess, not a tag",
+                                "vocals"
+                            }
+                        }
                         span { class: "bpm", "{bpm}" }
                         span { class: "key", "{key}" }
                     }

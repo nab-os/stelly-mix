@@ -19,6 +19,7 @@ pub mod mix;
 pub mod models;
 pub mod render;
 pub mod segments;
+pub mod serato;
 pub mod set;
 pub mod sets;
 pub mod source;
@@ -27,6 +28,7 @@ pub mod structure;
 pub mod tempo;
 pub mod text;
 pub mod transitions;
+pub mod vocals;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
