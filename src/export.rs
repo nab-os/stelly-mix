@@ -397,9 +397,15 @@ fn traktor(set: &Set, entries: &[Entry]) -> String {
     out.push_str(&format!("  <COLLECTION ENTRIES=\"{}\">\n", entries.len()));
     for entry in entries {
         out.push_str(&format!("    <ENTRY TITLE=\"{}\" ARTIST=\"{}\">\n", escape(&entry.title), escape(&entry.artist)));
-        let parent = entry.file.parent().map(traktor_dir).unwrap_or_else(|| "/:".into());
+        let (volume, dir) =
+            entry.file.parent().map(traktor_location).unwrap_or_else(|| (String::new(), "/:".into()));
         let file = entry.file.file_name().and_then(|n| n.to_str()).unwrap_or_default();
-        out.push_str(&format!("      <LOCATION DIR=\"{}\" FILE=\"{}\" VOLUME=\"\"/>\n", escape(&parent), escape(file)));
+        out.push_str(&format!(
+            "      <LOCATION DIR=\"{}\" FILE=\"{}\" VOLUME=\"{}\"/>\n",
+            escape(&dir),
+            escape(file),
+            escape(&volume)
+        ));
         out.push_str(&format!(
             "      <INFO PLAYTIME=\"{}\"{}/>\n",
             entry.seconds.round() as i64,
@@ -421,7 +427,11 @@ fn traktor(set: &Set, entries: &[Entry]) -> String {
     out.push_str(&format!("        <NODE TYPE=\"PLAYLIST\" NAME=\"{}\">\n", escape(&set.name)));
     out.push_str(&format!("          <PLAYLIST ENTRIES=\"{}\" TYPE=\"LIST\">\n", entries.len()));
     for entry in entries {
-        let key = format!("{}/:{}", entry.file.parent().map(traktor_dir).unwrap_or_default(), entry.file.file_name().and_then(|n| n.to_str()).unwrap_or_default());
+        // A playlist entry points at a collection entry by volume, directory
+        // and file run together — the directory already ends in its own
+        // separator, so nothing goes between them.
+        let (volume, dir) = entry.file.parent().map(traktor_location).unwrap_or_else(|| (String::new(), "/:".into()));
+        let key = format!("{volume}{dir}{}", entry.file.file_name().and_then(|n| n.to_str()).unwrap_or_default());
         out.push_str(&format!("            <ENTRY><PRIMARYKEY TYPE=\"TRACK\" KEY=\"{}\"/></ENTRY>\n", escape(&key)));
     }
     out.push_str("          </PLAYLIST>\n        </NODE>\n      </SUBNODES>\n    </NODE>\n  </PLAYLISTS>\n</NML>\n");
@@ -455,31 +465,56 @@ fn marks(entry: &Entry) -> Vec<(&'static str, f64)> {
     marks
 }
 
-/// Traktor writes a directory as `/:path/:to/:`.
-fn traktor_dir(path: &Path) -> String {
-    let mut out = String::new();
-    for part in path.components() {
-        let part = part.as_os_str().to_string_lossy();
-        if part == "/" {
-            continue;
-        }
-        out.push_str("/:");
-        out.push_str(&part);
+/// A path split into the volume it sits on and the rest of it, the rest
+/// with forward slashes.
+///
+/// Windows puts the drive in front — `C:\\music\\a.flac` — and neither
+/// program wants it there: Rekordbox writes it after the URL’s root slash,
+/// Traktor in a VOLUME of its own. Read off the string rather than off
+/// `Path::components`, so a Windows path is taken apart the same way
+/// wherever this runs and the tests below mean something on both.
+fn split_volume(path: &Path) -> (String, String) {
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    let drive = bytes.first().is_some_and(u8::is_ascii_alphabetic) && bytes.get(1) == Some(&b':');
+    // Only where a backslash is a separator: on Unix it is a legal character
+    // in a name, and turning it into a slash there invents a directory.
+    if !drive && !cfg!(windows) {
+        return (String::new(), text.into_owned());
     }
-    out.push_str("/:");
-    out
+    let text = text.replace('\\', "/");
+    match drive {
+        true => (text[..2].to_string(), text[2..].to_string()),
+        false => (String::new(), text),
+    }
+}
+
+/// Traktor writes a directory as `/:path/:to/:`, and the drive separately.
+fn traktor_location(path: &Path) -> (String, String) {
+    let (volume, rest) = split_volume(path);
+    let mut dir = String::new();
+    for part in rest.split('/').filter(|part| !part.is_empty()) {
+        dir.push_str("/:");
+        dir.push_str(part);
+    }
+    dir.push_str("/:");
+    (volume, dir)
 }
 
 /// `file://localhost/…`, percent-encoded, as Rekordbox writes locations.
 fn file_url(path: &Path) -> String {
+    let (volume, rest) = split_volume(path);
+    let full = format!("{volume}{rest}");
     let mut out = String::from("file://localhost");
-    let path = path.to_string_lossy();
-    if !path.starts_with('/') {
+    if !full.starts_with('/') {
         out.push('/');
     }
-    for byte in path.bytes() {
+    for byte in full.bytes() {
         match byte {
             b'/' => out.push('/'),
+            // A colon is legal unencoded in a URL’s path, and Rekordbox
+            // writes a drive letter’s colon plainly.
+            b':' => out.push(':'),
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(byte as char),
             _ => out.push_str(&format!("%{byte:02X}")),
         }
@@ -584,6 +619,10 @@ mod tests {
         assert!(nml.contains("START=\"200500.000000\""), "{nml}");
         assert!(nml.contains("KEY=\"8A\"") && nml.contains("BPM=\"128.000000\""), "{nml}");
         assert!(nml.contains("DIR=\"/:music/:sets/:Friday/:\""), "{nml}");
+        // The playlist points back at the collection by volume, directory
+        // and file run together: one separator between them, not two, or
+        // Traktor imports the playlist with every track missing.
+        assert!(nml.contains("KEY=\"/:music/:sets/:Friday/:01 - Lun - A Song.flac\""), "{nml}");
     }
 
     #[test]
@@ -606,6 +645,30 @@ mod tests {
         assert_eq!(escape("Bob & \"Alice\" <3"), "Bob &amp; &quot;Alice&quot; &lt;3");
         assert_eq!(quoted("a \"name\""), "\"a 'name'\"");
         assert!(file_url(Path::new("/music/a b&c.flac")).ends_with("/music/a%20b%26c.flac"));
+    }
+
+    /// A Windows path is a drive and a backslashed rest, and neither
+    /// program takes it as it comes: the export is the whole point of the
+    /// tool, so it has to land where it is read, not only where it is made.
+    #[test]
+    fn a_windows_path_is_written_the_way_each_program_reads_it() {
+        let windows = Path::new(r"C:\Users\dj\Music\Friday\01 - a.flac");
+        assert_eq!(
+            file_url(windows),
+            "file://localhost/C:/Users/dj/Music/Friday/01%20-%20a.flac",
+            "Rekordbox puts the drive after the root slash, colon and all"
+        );
+        // Named rather than taken with `parent()`: `Path` only splits on the
+        // host's separator, so on a Unix runner that whole thing is one
+        // component. What ships runs on Windows, where it does split.
+        let (volume, dir) = traktor_location(Path::new(r"C:\Users\dj\Music\Friday"));
+        assert_eq!(volume, "C:", "Traktor keeps the drive in a VOLUME of its own");
+        assert_eq!(dir, "/:Users/:dj/:Music/:Friday/:");
+
+        // And a Unix path keeps the shape it already had.
+        let unix = Path::new("/music/sets/Friday/01 - a.flac");
+        assert_eq!(file_url(unix), "file://localhost/music/sets/Friday/01%20-%20a.flac");
+        assert_eq!(traktor_location(unix.parent().unwrap()), (String::new(), "/:music/:sets/:Friday/:".into()));
     }
 
     #[test]

@@ -1,0 +1,45 @@
+# Dioxus 0.7 build config, for `dx bundle`.
+#
+# Desktop only: stelly-mix is a workbench you keep open beside the decks,
+# and its renderer is C++ through libclang, which is not something to carry
+# onto a phone.
+
+[application]
+name = "stelly-mix"
+
+[bundle]
+identifier = "fr.glargh.stelly-mix"
+publisher = "stelly-mix"
+category = "Music"
+short_description = "Beat grids, phrases and transitions for people who mix"
+long_description = """
+Plans a DJ set: where one track mixes into the next, how good that mix is,
+and the cue points to hand the result to Rekordbox, Traktor, Serato or Mixxx.
+"""
+
+# Two overlapping bars on the window's own background: two tracks, mixed.
+# Every size Windows, GNOME and the taskbar pick from, since the bundler
+# scales nothing itself.
+icon = [
+  "assets/icons/32x32.png",
+  "assets/icons/128x128.png",
+  "assets/icons/256x256.png",
+  "assets/icons/512x512.png",
+  "assets/icons/icon.ico",
+]
+
+[bundle.deb]
+section = "sound"
+priority = "optional"
+
+[bundle.windows]
+# The window is WebView2, which is on Windows 11 and on an updated 10 but
+# not guaranteed. The default here is `OfflineInstaller`, which carries the
+# whole runtime and adds over a hundred megabytes to a setup that will
+# almost never need it; the bootstrapper fetches it only if it is missing.
+webview_install_mode = { DownloadBootstrapper = { silent = true } }
+
+[bundle.windows.nsis]
+# Per-user, so installing wants no administrator: this is a tool someone
+# runs on their own laptop beside the decks, not fleet software.
+install_mode = "CurrentUser"

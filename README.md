@@ -103,6 +103,15 @@ other; peaks are held at -1 dBFS.
 
 Building it wants a C++ compiler and libclang, for Signalsmith Stretch.
 
+There are built packages on the [releases
+page](https://github.com/nab-os/stelly-mix/releases), if you would rather
+not: a `.deb` and an AppImage per Ubuntu release, and on Windows a `.exe`
+installer and an `.msi`, each with the command line in a tarball beside it
+— `vocals`, `sync` and `export` are run from there. Neither installer is
+signed, so Windows will ask twice before it runs one. The window is
+WebView2, which Windows 11 has; on 10 the installer fetches it if it is
+missing.
+
 `vocals` listens through the library for singing and keeps what it hears:
 
 ```sh
