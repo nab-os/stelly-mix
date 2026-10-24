@@ -1,253 +1,215 @@
-//! The library down the left: indexing more into it, filtering and sorting
-//! it, and what is under way.
+//! The source, down the left: what to put in the set next.
+//!
+//! This used to be the library — six thousand names in a column with a
+//! filter over them, which is not how anyone finds music. Nobody browses a
+//! library that size; they ask it a question. So the pane answers one, three
+//! ways: what fits the gap you have picked, what matches a name, and what
+//! sounds like a description.
+//!
+//! It is one half of the workbench. The set is the other, in the main area,
+//! and the two share a `Bench` — which is what lets a row here know what it
+//! would be mixing into, and lets its ⊕ put the track exactly where the
+//! insert point is rather than nowhere.
 
-use super::State;
+use super::sets::Bench;
+use super::{icons, score_class, Lib, State};
 use crate::work;
 use dioxus::prelude::*;
-use stelly_mix::indexing::{self, Event};
 
-/// Rows drawn at once; a filter narrows past it.
-const SHOWN: usize = 400;
+/// Rows at once. A column this narrow shows about this many without
+/// scrolling, and the covers behind them are one request.
+const SHOWN: usize = 40;
 
+/// Which question the pane is answering.
 #[derive(Clone, Copy, PartialEq)]
-enum Sort {
+enum Asking {
+    Fits,
     Name,
-    Tempo,
-    Key,
+    Sounds,
 }
 
 #[component]
 pub fn Sidebar() -> Element {
     let state = use_context::<State>();
-    let mut filter = use_signal(String::new);
-    let mut sort = use_signal(|| Sort::Name);
-    let mut adding = use_signal(String::new);
+    let bench = use_context::<Bench>();
+    let mut asking = use_signal(|| Asking::Fits);
+    let mut words = use_signal(String::new);
+    let mut found: Signal<Vec<(String, Option<f64>)>> = use_signal(Vec::new);
+    let mut looking = use_signal(|| false);
+    let mut art: Signal<std::collections::HashMap<String, String>> = use_signal(Default::default);
 
     let library = (state.library)();
-    let words: Vec<String> = filter().to_lowercase().split_whitespace().map(str::to_string).collect();
-    let rows: Vec<(String, String, String, bool, std::path::PathBuf)> = match &library {
-        None => Vec::new(),
-        Some(lib) => {
-            let mut tracks: Vec<&stelly_mix::library::Track> = lib
-                .0
-                .tracks
-                .iter()
-                .filter(|t| {
-                    let name = t.name().to_lowercase();
-                    words.iter().all(|w| name.contains(w.as_str()))
-                })
-                .collect();
-            match sort() {
-                Sort::Name => tracks.sort_by_key(|t| t.name().to_lowercase()),
-                Sort::Tempo => tracks.sort_by(|a, b| a.bpm().unwrap_or(0.0).total_cmp(&b.bpm().unwrap_or(0.0))),
-                Sort::Key => tracks.sort_by_key(|t| t.analysis.key.as_ref().map(|k| camelot_order(&k.camelot))),
-            }
-            tracks
-                .into_iter()
-                .map(|t| {
-                    let bpm = t.bpm().map_or("–".into(), |b| format!("{b:.1}"));
-                    let key = t.analysis.key.as_ref().map_or("–".into(), |k| k.camelot.clone());
-                    let sings = t.vocals.as_ref().is_some_and(|heard| heard.speaks());
-                    (t.name(), bpm, key, sings, t.path.clone())
-                })
-                .collect()
-        }
-    };
-    let total = rows.len();
-    let selected = (state.selected)();
+    let set = bench.set();
+    let at = bench.insert_at.read().unwrap_or(usize::MAX);
 
-    let mut index = move || {
-        let argument = adding().trim().to_string();
-        if argument.is_empty() || (state.busy)().is_some() {
-            return;
+    // Re-asked whenever the question, the words, the set or the insert point
+    // changes: the answer depends on all four.
+    use_effect(move || {
+        let (which, text) = (asking(), words().trim().to_string());
+        let Some(lib) = (state.library)() else { return };
+        let set = bench.set();
+        let gap = bench.insert_at.read().unwrap_or(usize::MAX);
+        looking.set(true);
+        spawn(async move {
+            let hits = work::blocking(move || {
+                Ok(match which {
+                    Asking::Fits => match &set {
+                        Some(set) if !set.tracks.is_empty() => {
+                            work::fits_between(&lib.0, set, gap.min(set.tracks.len()), SHOWN)
+                                .into_iter()
+                                .map(|(key, score)| (key, Some(score)))
+                                .collect()
+                        }
+                        _ => Vec::new(),
+                    },
+                    Asking::Name => work::search_library(&lib.0, &text, SHOWN)
+                        .into_iter()
+                        .filter_map(|i| Some((lib.0.tracks[i].origin.as_ref()?.key(), None)))
+                        .collect(),
+                    Asking::Sounds => work::sounds_like(&lib.0, &text, SHOWN)?
+                        .into_iter()
+                        .map(|(key, rank)| (key, Some(rank)))
+                        .collect(),
+                })
+            })
+            .await
+            .unwrap_or_default();
+            let keys: Vec<String> = hits.iter().map(|(key, _)| key.clone()).collect();
+            found.set(hits);
+            looking.set(false);
+            art.set(work::known_covers(&keys));
+            let _ = work::blocking({
+                let keys = keys.clone();
+                move || work::fetch_covers(&keys)
+            })
+            .await;
+            art.set(work::known_covers(&keys));
+        });
+    });
+
+    let tab = move |which: Asking, label: &'static str, hint: &'static str| {
+        rsx! {
+            button {
+                class: if asking() == which { "active" } else { "" },
+                title: "{hint}",
+                onclick: move |_| asking.set(which),
+                "{label}"
+            }
         }
-        adding.set(String::new());
-        start_indexing(state, argument);
     };
 
     rsx! {
-        div { class: "sidebar",
+        aside { class: "sidebar",
             header {
                 div { class: "brand", "stelly", span { "-mix" } }
-                div { class: "row-flex",
+                div { class: "segmented wide",
+                    {tab(Asking::Fits, "fits here", "what mixes best into the gap you have picked")}
+                    {tab(Asking::Name, "by name", "search the library by artist or title")}
+                    {tab(Asking::Sounds, "by sound", "describe it and the library is ranked against the words")}
+                }
+                if asking() != Asking::Fits {
                     input {
-                        class: "spacer",
-                        placeholder: "Folder, file, or stelly:album/<id>, mood/<words>…",
-                        value: "{adding}",
-                        oninput: move |e| adding.set(e.value()),
-                        onkeydown: move |e| {
-                            if e.key() == Key::Enter {
-                                index();
-                            }
+                        placeholder: if asking() == Asking::Name { "artist or title" } else { "e.g. dark rolling techno" },
+                        value: "{words}",
+                        oninput: move |event| words.set(event.value()),
+                    }
+                }
+                div { class: "muted small row-flex",
+                    if looking() {
+                        span { class: "working-dot" }
+                    }
+                    match (asking(), &set) {
+                        (Asking::Fits, None) => rsx! { span { "open a set to see what fits it" } },
+                        (Asking::Fits, Some(set)) if set.tracks.is_empty() => rsx! { span { "plan or add a track first" } },
+                        (Asking::Fits, Some(set)) => rsx! {
+                            span { "into {gap_label(at, set.tracks.len())}" }
                         },
+                        _ => rsx! { span { "{found.read().len()} of the library" } },
+                    }
+                }
+            }
+
+            div { class: "sources",
+                if let Some(library) = library {
+                    for (key, score) in found() {
+                        SourceRow { key: "{key}", origin: key.clone(), score, library: library.clone(), art }
+                    }
+                } else {
+                    p { class: "muted small", "reading the library…" }
+                }
+            }
+        }
+    }
+}
+
+/// Where the insert point is, said in a way that names the tracks it falls
+/// between rather than a number nobody is counting.
+fn gap_label(at: usize, len: usize) -> String {
+    match at {
+        0 => "the front".into(),
+        at if at >= len => "the end".into(),
+        at => format!("after {at}"),
+    }
+}
+
+/// One candidate: what it is, how well it would sit there, and a way in.
+#[component]
+fn SourceRow(
+    origin: String,
+    score: Option<f64>,
+    library: Lib,
+    art: Signal<std::collections::HashMap<String, String>>,
+) -> Element {
+    let state = use_context::<State>();
+    let mut bench = use_context::<Bench>();
+    let Some(track) = library.0.tracks.iter().find(|t| t.origin.as_ref().is_some_and(|o| o.key() == origin)) else {
+        return rsx! {};
+    };
+    let item = track.origin.as_ref().expect("found by origin");
+    let cover = art.read().get(&origin).cloned();
+    let steady = track.analysis.grid.as_ref().is_some_and(|g| g.steady);
+    let sings = track.vocals.as_ref().is_some_and(|heard| heard.speaks());
+    let path = track.path.clone();
+
+    rsx! {
+        div { class: "source-row", title: "{track.name()}",
+            div { class: "source-art",
+                if let Some(url) = cover {
+                    img { src: "{url}", alt: "" }
+                }
+            }
+            div { class: "source-of",
+                div { class: "source-title ellipsis", "{item.item.title}" }
+                div { class: "source-artist ellipsis", "{item.item.artist}" }
+                div { class: "source-facts",
+                    span { class: "num", "{track.bpm().unwrap_or(0.0):.0}" }
+                    if let Some(camelot) = track.analysis.key.as_ref().map(|k| k.camelot.clone()) {
+                        span { "{camelot}" }
+                    }
+                    if sings { span { class: "dot warm", title: "there is singing in it: a guess, not a tag", "•" } }
+                    if !steady { span { class: "dot bad", title: "its tempo drifts", "•" } }
+                }
+            }
+            div { class: "source-end",
+                if let Some(score) = score {
+                    span { class: "{score_class(score)}", "{score:.2}" }
+                }
+                div { class: "source-actions",
+                    button { class: "icon-btn", title: "open this track's details", onclick: move |_| state.open(path.clone()),
+                        {icons::track()}
                     }
                     button {
-                        disabled: adding().trim().is_empty() || (state.busy)().is_some(),
-                        onclick: move |_| index(),
-                        "Index"
+                        class: "icon-btn add",
+                        title: "put it in the set at the insert point",
+                        disabled: bench.editing.read().is_none(),
+                        onclick: {
+                            let origin = origin.clone();
+                            move |_| bench.wanted.set(Some(origin.clone()))
+                        },
+                        {icons::plus()}
                     }
-                }
-                div { class: "row-flex",
-                    input {
-                        class: "spacer",
-                        placeholder: "Filter the library",
-                        value: "{filter}",
-                        oninput: move |e| filter.set(e.value()),
-                    }
-                    select {
-                        onchange: move |e| sort.set(match e.value().as_str() {
-                            "tempo" => Sort::Tempo,
-                            "key" => Sort::Key,
-                            _ => Sort::Name,
-                        }),
-                        option { value: "name", "Name" }
-                        option { value: "tempo", "BPM" }
-                        option { value: "key", "Key" }
-                    }
-                }
-                div { class: "muted small",
-                    match &library {
-                        None => rsx! { "Reading the library…" },
-                        Some(lib) if total == lib.0.tracks.len() => rsx! { "{total} tracks" },
-                        Some(lib) => rsx! { "{total} of {lib.0.tracks.len()} tracks" },
-                    }
-                }
-            }
-            div { class: "tracks",
-                for (name, bpm, key, sings, path) in rows.into_iter().take(SHOWN) {
-                    div {
-                        key: "{path.display()}",
-                        class: if selected.as_ref() == Some(&path) { "track-row selected" } else { "track-row" },
-                        title: "{path.display()}",
-                        onclick: move |_| state.open(path.clone()),
-                        span { class: "ellipsis", "{name}" }
-                        if sings {
-                            // The word, not the icon: at this size a glyph
-                            // for a voice is a glyph for anything.
-                            span {
-                                class: "badge warm vocals",
-                                title: "there is singing in this, as CLAP hears it: a guess, not a tag",
-                                "vocals"
-                            }
-                        }
-                        span { class: "bpm", "{bpm}" }
-                        span { class: "key", "{key}" }
-                    }
-                }
-                if total > SHOWN {
-                    div { class: "muted small", style: "padding: 6px 8px", "and {total - SHOWN} more: filter to find them" }
-                }
-                if let Some(lib) = &library {
-                    if lib.0.tracks.is_empty() {
-                        div { class: "muted small", style: "padding: 6px 8px",
-                            "Nothing indexed yet. Give a folder of music above, or `stelly-mix index <folder>`."
-                        }
-                    }
-                }
-            }
-            Status {}
-        }
-    }
-}
-
-#[component]
-fn Status() -> Element {
-    let state = use_context::<State>();
-    let mut error = state.error;
-    rsx! {
-        if let Some(busy) = (state.busy)() {
-            div { class: "status", "{busy}" }
-        }
-        if let Some(message) = (state.load_error)() {
-            div { class: "status error", "The library could not be read: {message}" }
-        }
-        if let Some(message) = error() {
-            div { class: "status",
-                div { class: "row-flex",
-                    span { class: "error spacer", "{message}" }
-                    button { onclick: move |_| error.set(None), "×" }
                 }
             }
         }
     }
-}
-
-/// Index `argument` on the blocking pool, saying how it goes, then read the
-/// library again: a `stelly:` selection on Stelly's server, then synced in;
-/// anything else here.
-fn start_indexing(state: State, argument: String) {
-    if argument.starts_with("stelly:") {
-        if let Some(stelly) = work::stelly() {
-            return start_server_analysis(state, stelly, argument);
-        }
-    }
-    let mut busy = state.busy;
-    busy.set(Some(format!("Indexing {argument}…")));
-    let (tell, mut heard) = tokio::sync::mpsc::unbounded_channel::<String>();
-    spawn(async move {
-        while let Some(line) = heard.recv().await {
-            busy.set(Some(line));
-        }
-    });
-    spawn(async move {
-        let shown = argument.clone();
-        let done = work::blocking(move || {
-            let library = work::library()?;
-            let files = indexing::gather(&[argument], work::sources())?;
-            let report = |event: Event| {
-                let line = match event {
-                    Event::Starting { total } => format!("Indexing {total} tracks…"),
-                    Event::Indexed { done, total, track } => format!("Indexed {done} of {total}: {}", track.name()),
-                    Event::Failed { name, error } => format!("{name}: {error}"),
-                };
-                let _ = tell.send(line);
-            };
-            indexing::run(files, &library, &stelly_mix::Options::default(), false, &report)
-        })
-        .await;
-        busy.set(None);
-        match done {
-            Ok(0) => state.fail(anyhow::anyhow!("nothing new to index in {shown}")),
-            Ok(_) => state.reload(),
-            Err(err) => state.fail(err),
-        }
-    });
-}
-
-/// Have Stelly's server analyse `argument`, following it in the status line,
-/// then bring what it made into the library.
-fn start_server_analysis(state: State, stelly: &'static stelly_mix::stelly::Stelly, argument: String) {
-    let mut busy = state.busy;
-    let selection: stelly_mix::api::Selection = match argument.parse() {
-        Ok(selection) => selection,
-        Err(err) => return state.fail(anyhow::anyhow!(err)),
-    };
-    busy.set(Some(format!("Asking Stelly's server for {selection}…")));
-    let (tell, mut heard) = tokio::sync::mpsc::unbounded_channel::<String>();
-    spawn(async move {
-        while let Some(line) = heard.recv().await {
-            busy.set(Some(line));
-        }
-    });
-    spawn(async move {
-        let done = work::blocking(move || {
-            let stats = stelly.analyse_and_wait(&selection, &|line| {
-                let _ = tell.send(format!("Server: {line}"));
-            })?;
-            let _ = tell.send(format!("Server analysed {} ({} failed); bringing them in…", stats.done, stats.failed));
-            stelly.sync(&work::library()?, &|_, _| {})
-        })
-        .await;
-        busy.set(None);
-        match done {
-            Ok(_) => state.reload(),
-            Err(err) => state.fail(err),
-        }
-    });
-}
-
-/// Camelot keys in wheel order: 1A, 1B, 2A … 12B.
-fn camelot_order(camelot: &str) -> (u32, char) {
-    let (number, letter) = camelot.split_at(camelot.len().saturating_sub(1));
-    (number.parse().unwrap_or(99), letter.chars().next().unwrap_or('Z'))
 }

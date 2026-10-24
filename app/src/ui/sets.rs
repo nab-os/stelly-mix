@@ -9,7 +9,6 @@
 //! Nothing here writes to disk until Save. An edit changes what is on
 //! screen; the badge by the name says whether that has been kept.
 
-use super::search::Search;
 use super::waveform::{Span, Waveform};
 use super::{icons, score_class, Lib, State};
 use crate::work::Clip;
@@ -31,9 +30,37 @@ impl By {
     const ALL: [(By, &'static str); 4] = [(By::Made, "made"), (By::Name, "name"), (By::Length, "length"), (By::Score, "mixing")];
 }
 
+/// The workbench: the set being worked on and where the next track goes.
+/// Shared, because the source pane down the left is the other half of it —
+/// it has to know what the set is to rank anything against it, and where
+/// the insert point is to put anything anywhere.
+#[derive(Clone, Copy)]
+pub struct Bench {
+    pub editing: Signal<Option<Editing>>,
+    /// The gap a track from the source drops into. `None` is the end.
+    pub insert_at: Signal<Option<usize>>,
+    /// A track the source asked to put in, by origin key.
+    pub wanted: Signal<Option<String>>,
+}
+
+impl Bench {
+    pub fn provide() -> Self {
+        use_context_provider(|| Bench {
+            editing: Signal::new(None),
+            insert_at: Signal::new(None),
+            wanted: Signal::new(None),
+        })
+    }
+
+    /// The set as it stands, for the source pane to rank against.
+    pub fn set(&self) -> Option<Set> {
+        self.editing.read().as_ref().map(|held| held.set.clone())
+    }
+}
+
 /// The set being worked on, and the copy that is on disk, if any.
 #[derive(Clone, PartialEq)]
-struct Editing {
+pub struct Editing {
     set: Set,
     /// `None` for a set that has never been kept.
     saved: Option<Set>,
@@ -69,7 +96,8 @@ pub fn SetsView() -> Element {
     let mut failed: Signal<Option<String>> = use_signal(|| None);
     let mut by = use_signal(|| By::Made);
     let mut filter = use_signal(String::new);
-    let mut open: Signal<Option<Editing>> = use_signal(|| None);
+    let bench = use_context::<Bench>();
+    let mut open = bench.editing;
 
     let reload = move || {
         spawn(async move {
@@ -306,15 +334,16 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
         });
     };
 
-    // A card's Add has no gap in mind, so it goes on the end. Declared up
-    // here with the rest of the hooks: below the early returns it would be
-    // skipped while the library loads, and the hook order has to hold.
-    let mut search = use_context::<Search>();
+    // Whatever the source pane asked to put in, at the insert point it was
+    // pointing at. Declared with the rest of the hooks: below the early
+    // returns it would be skipped while the library loads.
+    let mut bench = use_context::<Bench>();
     use_effect(move || {
-        let Some(key) = search.wanted.read().clone() else { return };
+        let Some(key) = bench.wanted.read().clone() else { return };
         let Some(library) = state.library.peek().clone() else { return };
-        search.wanted.set(None);
-        edit((library, Edit::Insert(usize::MAX, key)));
+        bench.wanted.set(None);
+        let at = bench.insert_at.peek().unwrap_or(usize::MAX);
+        edit((library, Edit::Insert(at, key)));
     });
 
     let Some(library) = state.library.read().clone() else {
@@ -482,7 +511,7 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
                     }
                 }
                 ol { class: "list tracklist",
-                    GapLine { at: 0, picking, open, library: library.clone(), edit }
+                    GapLine { at: 0, total: resolved.plan.tracks.len(), picking, open, library: library.clone(), edit }
                     for (k, &at) in resolved.plan.tracks.iter().enumerate() {
                         {
                             let track = &library.0.tracks[at];
@@ -539,7 +568,7 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
                                 if picking() == Some(Pick { at: k, swapping: true }) {
                                     Picker { at: k, swapping: true, open, picking, library: library.clone(), edit }
                                 }
-                                GapLine { at: k + 1, picking, open, library: library.clone(), edit }
+                                GapLine { at: k + 1, total: resolved.plan.tracks.len(), picking, open, library: library.clone(), edit }
                             }
                         }
                     }
@@ -580,22 +609,23 @@ struct Pick {
 
 /// The line between two tracks that opens a picker.
 #[component]
-fn GapLine(at: usize, picking: Signal<Option<Pick>>, open: Signal<Option<Editing>>, library: Lib, edit: EventHandler<(Lib, Edit)>) -> Element {
+fn GapLine(at: usize, total: usize, picking: Signal<Option<Pick>>, open: Signal<Option<Editing>>, library: Lib, edit: EventHandler<(Lib, Edit)>) -> Element {
     let mut picking = picking;
-    let search = use_context::<Search>();
+    let mut bench = use_context::<Bench>();
     let mut over = use_signal(|| false);
     let open_here = picking() == Some(Pick { at, swapping: false });
-    // A card is in the air: every gap says it will take it, so there is
-    // somewhere visible to aim at.
-    let catching = search.dragging.read().is_some();
+    // The one the source pane is aiming at. The end is the default, so the
+    // last gap is marked when nothing has been picked.
+    let marked = bench.insert_at.read().map_or(at + 1 == total, |picked| picked == at);
     rsx! {
         li {
-            class: match (open_here, catching, over()) {
-                (_, _, true) => "gap catching over",
-                (_, true, false) => "gap catching",
+            class: match (open_here, over(), marked) {
+                (_, true, _) => "gap over",
                 (true, _, _) => "gap open",
+                (_, _, true) => "gap marked",
                 _ => "gap",
             },
+            onclick: move |_| bench.insert_at.set(Some(at)),
             ondragover: move |event| {
                 event.prevent_default();
                 if !over() {
@@ -608,7 +638,7 @@ fn GapLine(at: usize, picking: Signal<Option<Pick>>, open: Signal<Option<Editing
                 move |event| {
                     event.prevent_default();
                     over.set(false);
-                    if let Some(key) = search.dragging.read().clone() {
+                    if let Some(key) = bench.wanted.read().clone() {
                         edit((library.clone(), Edit::Insert(at, key)));
                     }
                 }
@@ -618,7 +648,7 @@ fn GapLine(at: usize, picking: Signal<Option<Pick>>, open: Signal<Option<Editing
                 title: "add a track here",
                 onclick: move |_| picking.set(if open_here { None } else { Some(Pick { at, swapping: false }) }),
                 {icons::plus()}
-                span { "add a track here" }
+                span { if marked { "the source puts tracks here" } else { "put tracks here" } }
             }
         }
         if open_here {

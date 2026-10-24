@@ -240,6 +240,24 @@ pub fn search_library(loaded: &Loaded, words: &str, limit: usize) -> Vec<usize> 
     hits
 }
 
+/// The library ranked against a description, best first, as origin keys
+/// with their rank 0..1. The text tower is loaded on the first call.
+pub fn sounds_like(loaded: &Loaded, words: &str, limit: usize) -> Result<Vec<(String, f64)>> {
+    if words.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let ranks = like(loaded, words)?;
+    let mut scored: Vec<(String, f64)> = loaded
+        .tracks
+        .iter()
+        .zip(&ranks)
+        .filter_map(|(track, &rank)| Some((track.origin.as_ref()?.key(), rank)))
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.truncate(limit);
+    Ok(scored)
+}
+
 // ----------------------------------------------------------------- covers
 
 /// Cover art by the server's track id, remembered for as long as the window
