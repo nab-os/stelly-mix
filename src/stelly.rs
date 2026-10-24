@@ -145,6 +145,28 @@ impl Stelly {
         Ok(done)
     }
 
+    /// Have the server analyse track `id` for mixing now, ahead of what it
+    /// has queued, and wait for it: a download and seconds of analysis,
+    /// longer when its workers are busy. None from a server from before it
+    /// could, or that has no such track: the caller analyses it here then.
+    pub fn analyse_now(&self, id: &str) -> Result<Option<crate::library::Track>> {
+        let path = format!("/api/mix/tracks/{id}/analyse");
+        let response = self
+            .agent
+            .post(&format!("{}{path}", self.base))
+            .header("Authorization", &format!("Bearer {}", self.token))
+            .config()
+            // The server waits up to ten minutes before saying it is still queued.
+            .timeout_global(Some(Duration::from_secs(11 * 60)))
+            .build()
+            .send_empty()
+            .with_context(|| format!("reaching Stelly's server at {}", self.base))?;
+        if response.status().as_u16() == 404 {
+            return Ok(None);
+        }
+        answer(&path, response).map(Some)
+    }
+
     /// What the family liked on Stelly after `since`, Unix seconds, newest
     /// first: liked tracks and the tracks of liked albums. The server queues
     /// each for its mix analysis as it is liked, so most are analysed by the
@@ -387,6 +409,10 @@ impl Source for Stelly {
             bail!("{SOURCE}:{reference}: not in Stelly's space");
         }
         Ok(items)
+    }
+
+    fn analysed(&self, item: &Item) -> Result<Option<crate::library::Track>> {
+        self.analyse_now(&item.id)
     }
 
     fn search(&self, query: &str, limit: usize) -> Result<Vec<Item>> {
