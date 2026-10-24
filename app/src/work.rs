@@ -48,9 +48,31 @@ impl Loaded {
 }
 
 /// Stelly's server, when one is set: its mix library is mirrored at start.
+/// The server this window talks to. Replaceable, so settings can point it
+/// somewhere else without a restart; leaked rather than locked, because
+/// every caller holds it for the length of a blocking call.
+static SERVER: Mutex<Option<&'static stelly_mix::stelly::Stelly>> = Mutex::new(None);
+static SERVER_READ: OnceLock<()> = OnceLock::new();
+
 pub fn stelly() -> Option<&'static stelly_mix::stelly::Stelly> {
-    static STELLY: OnceLock<Option<stelly_mix::stelly::Stelly>> = OnceLock::new();
-    STELLY.get_or_init(stelly_mix::stelly::Stelly::from_env).as_ref()
+    SERVER_READ.get_or_init(|| {
+        if let Some(found) = stelly_mix::stelly::Stelly::from_env() {
+            *SERVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::leak(Box::new(found)));
+        }
+    });
+    *SERVER.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Point the window at `base` with `token` from here on, and keep it for
+/// the next run. The server is tried before it is kept: a token that does
+/// not work should not replace one that does.
+pub fn set_server(base: &str, token: &str) -> Result<stelly_mix::api::Status> {
+    let server = stelly_mix::stelly::Stelly::new(base, token);
+    let status = server.status()?;
+    stelly_mix::stelly::save(base, token)?;
+    SERVER_READ.get_or_init(|| {});
+    *SERVER.lock().unwrap_or_else(|e| e.into_inner()) = Some(Box::leak(Box::new(server)));
+    Ok(status)
 }
 
 pub fn library() -> Result<Library> {
@@ -197,6 +219,238 @@ pub fn render_set(loaded: &Loaded, plan: &Plan) -> Result<Clip> {
         title: format!("a set of {} from {}", chain.len(), chain[0].name()),
         marks,
     })
+}
+
+/// Library tracks whose name holds every word of `words`, best match first
+/// by name length: a short name containing the words is more likely the one
+/// meant than a long one that happens to.
+pub fn search_library(loaded: &Loaded, words: &str, limit: usize) -> Vec<usize> {
+    let wanted: Vec<String> = words.split_whitespace().map(str::to_lowercase).collect();
+    if wanted.is_empty() {
+        return Vec::new();
+    }
+    let mut hits: Vec<usize> = (0..loaded.tracks.len())
+        .filter(|&i| {
+            let name = loaded.tracks[i].name().to_lowercase();
+            wanted.iter().all(|word| name.contains(word.as_str()))
+        })
+        .collect();
+    hits.sort_by_key(|&i| loaded.tracks[i].name().len());
+    hits.truncate(limit);
+    hits
+}
+
+/// The library ranked against a description, best first, as origin keys
+/// with their rank 0..1. The text tower is loaded on the first call.
+pub fn sounds_like(loaded: &Loaded, words: &str, limit: usize) -> Result<Vec<(String, f64)>> {
+    if words.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let ranks = like(loaded, words)?;
+    let mut scored: Vec<(String, f64)> = loaded
+        .tracks
+        .iter()
+        .zip(&ranks)
+        .filter_map(|(track, &rank)| Some((track.origin.as_ref()?.key(), rank)))
+        .collect();
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+    scored.truncate(limit);
+    Ok(scored)
+}
+
+// ----------------------------------------------------------------- covers
+
+/// Cover art by the server's track id, remembered for as long as the window
+/// is open: the catalogue's artwork does not change under us, and asking
+/// again for a cover already on screen is a round trip for nothing.
+static COVERS: Mutex<Option<std::collections::HashMap<i64, Option<String>>>> = Mutex::new(None);
+
+/// The server's id out of an origin key, `stelly:<id>`.
+pub fn track_id(key: &str) -> Option<i64> {
+    key.strip_prefix(&format!("{}:", stelly_mix::stelly::SOURCE))?.parse().ok()
+}
+
+/// What is already known, without asking: for a first paint that does not
+/// wait on the network.
+pub fn known_covers(keys: &[String]) -> std::collections::HashMap<String, String> {
+    let held = COVERS.lock().unwrap_or_else(|e| e.into_inner());
+    let Some(held) = held.as_ref() else { return Default::default() };
+    keys.iter()
+        .filter_map(|key| {
+            let url = held.get(&track_id(key)?)?.clone()?;
+            Some((key.clone(), url))
+        })
+        .collect()
+}
+
+/// Fetch whatever of `keys` has no answer yet. A track the server has no
+/// art for is remembered as having none, so it is asked for once.
+pub fn fetch_covers(keys: &[String]) -> Result<()> {
+    let Some(server) = stelly() else { return Ok(()) };
+    let wanted: Vec<i64> = {
+        let held = COVERS.lock().unwrap_or_else(|e| e.into_inner());
+        let known = held.as_ref();
+        keys.iter()
+            .filter_map(|key| track_id(key))
+            .filter(|id| known.is_none_or(|k| !k.contains_key(id)))
+            .collect()
+    };
+    if wanted.is_empty() {
+        return Ok(());
+    }
+    let found = server.covers(&wanted)?;
+    let mut held = COVERS.lock().unwrap_or_else(|e| e.into_inner());
+    let held = held.get_or_insert_with(Default::default);
+    for id in &wanted {
+        held.insert(*id, None);
+    }
+    for (id, url) in found {
+        held.insert(id, Some(url));
+    }
+    Ok(())
+}
+
+// ------------------------------------------------------------------- sets
+
+pub fn sets() -> Result<stelly_mix::sets::Sets> {
+    stelly_mix::sets::Sets::open(stelly_mix::sets::Sets::default_dir())
+}
+
+/// Every set kept, newest first.
+pub fn kept_sets() -> Result<Vec<stelly_mix::sets::Set>> {
+    sets()?.all()
+}
+
+/// Keep `plan` under `name`, as it was planned.
+pub fn save_set(loaded: &Loaded, plan: &Plan, name: &str, planned: stelly_mix::sets::Planned) -> Result<stelly_mix::sets::Set> {
+    let set = stelly_mix::sets::Set::of(name, plan, &loaded.tracks, planned)?;
+    sets()?.put(&set)?;
+    Ok(set)
+}
+
+/// Re-cut a set after an edit. Nothing is written: an edit is a change to
+/// what is on screen, and only Save puts it on disk. The library's own
+/// sound scale is handed in rather than worked out again, since working it
+/// out samples the whole library.
+pub fn edit_set(
+    loaded: &Loaded,
+    mut set: stelly_mix::sets::Set,
+    edit: impl FnOnce(&mut stelly_mix::sets::Set, &[Track], f64, stelly_mix::transitions::SoundScale) -> Result<()>,
+) -> Result<stelly_mix::sets::Set> {
+    let stretch = set.planned.max_stretch;
+    edit(&mut set, &loaded.tracks, stretch, loaded.scale)?;
+    Ok(set)
+}
+
+/// Plan `set`'s tracklist: from `first` if a track is picked, otherwise
+/// from the library's best match for the description it was given.
+///
+/// The set keeps its name and its id; only what is in it changes, and
+/// nothing is written.
+pub fn plan_into(loaded: &Loaded, mut set: stelly_mix::sets::Set, first: Option<usize>) -> Result<stelly_mix::sets::Set> {
+    let mut options = set.planned.options();
+    let wanted = set.planned.like.clone().filter(|text| !text.trim().is_empty());
+    if let Some(words) = &wanted {
+        options.like = Some(like(loaded, words)?);
+    }
+    let start = match (first, &options.like) {
+        (Some(at), _) => at,
+        (None, Some(scores)) => (0..loaded.tracks.len())
+            .filter(|&i| loaded.tracks[i].analysis.grid.as_ref().is_some_and(|g| g.steady))
+            .max_by(|&a, &b| scores[a].total_cmp(&scores[b]))
+            .context("the library is empty")?,
+        (None, None) => anyhow::bail!("pick a track on the left to start from, or describe how it should sound"),
+    };
+    let plan = stelly_mix::set::plan(&loaded.tracks, start, &options).context("that track has no tempo to hold a set at")?;
+    set.take_plan(&plan, &loaded.tracks)?;
+    Ok(set)
+}
+
+/// Tracks of the library whose name holds every word of `words`, as the
+/// sidebar filters, with how well each would sit in the gap at `at`.
+pub fn search_for_gap(
+    loaded: &Loaded,
+    set: &stelly_mix::sets::Set,
+    at: usize,
+    words: &str,
+    limit: usize,
+) -> Vec<(String, String, Option<f64>)> {
+    let fits: std::collections::HashMap<String, f64> = set
+        .fits_between(at, &loaded.tracks, set.planned.max_stretch, loaded.scale, 400)
+        .into_iter()
+        .map(|fit| (fit.key, fit.mean))
+        .collect();
+    let wanted: Vec<String> = words.split_whitespace().map(str::to_lowercase).collect();
+    let mut found: Vec<(String, String, Option<f64>)> = loaded
+        .tracks
+        .iter()
+        .filter_map(|track| {
+            let key = track.origin.as_ref()?.key();
+            if set.tracks.contains(&key) {
+                return None;
+            }
+            let name = track.name();
+            let haystack = name.to_lowercase();
+            wanted.iter().all(|word| haystack.contains(word.as_str())).then(|| (key.clone(), name, fits.get(&key).copied()))
+        })
+        .collect();
+    // What mixes best first, then the rest by name: a search is for finding
+    // one track, but if several match, the one that fits should lead.
+    found.sort_by(|a, b| match (a.2, b.2) {
+        (Some(x), Some(y)) => y.total_cmp(&x),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.1.to_lowercase().cmp(&b.1.to_lowercase()),
+    });
+    found.truncate(limit);
+    found
+}
+
+/// Keep `set` under a new name, as "Save as" does.
+pub fn save_set_as(set: &stelly_mix::sets::Set, name: &str) -> Result<stelly_mix::sets::Set> {
+    let copy = set.duplicate(name);
+    sets()?.put(&copy)?;
+    Ok(copy)
+}
+
+/// Keep a set up to `at` and plan the rest again. The description it was
+/// planned on is scored again where it had one, which wants the text tower.
+pub fn replan_set(loaded: &Loaded, mut set: stelly_mix::sets::Set, at: usize) -> Result<stelly_mix::sets::Set> {
+    let mut options = set.planned.options();
+    if let Some(words) = set.planned.like.clone().filter(|text| !text.trim().is_empty()) {
+        options.like = Some(like(loaded, &words)?);
+    }
+    set.replan_from(at, &loaded.tracks, options)?;
+    Ok(set)
+}
+
+/// What else could sit at `at` in `set`, best first.
+pub fn alternatives_for(loaded: &Loaded, set: &stelly_mix::sets::Set, at: usize, limit: usize) -> Vec<stelly_mix::sets::Fit> {
+    set.alternatives(at, &loaded.tracks, set.planned.max_stretch, loaded.scale, limit)
+}
+
+/// What would go in the gap before `at`, best first.
+pub fn fits_between(loaded: &Loaded, set: &stelly_mix::sets::Set, at: usize, limit: usize) -> Vec<stelly_mix::sets::Fit> {
+    set.fits_between(at, &loaded.tracks, set.planned.max_stretch, loaded.scale, limit)
+}
+
+pub fn put_set(set: &stelly_mix::sets::Set) -> Result<()> {
+    sets()?.put(set)
+}
+
+pub fn forget_set(id: &str) -> Result<bool> {
+    sets()?.remove(id)
+}
+
+/// Write a kept set into a folder to open on the decks.
+pub fn export_set(
+    set: &stelly_mix::sets::Set,
+    loaded: &Loaded,
+    into: &Path,
+    options: &stelly_mix::export::Options,
+    report: &dyn Fn(&str),
+) -> Result<stelly_mix::export::Exported> {
+    stelly_mix::export::write(set, &loaded.tracks, sources(), into, options, report)
 }
 
 /// Every track's likeness to `description`, 0..1 by rank. The text tower is

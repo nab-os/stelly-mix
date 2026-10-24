@@ -230,6 +230,17 @@ impl Sources {
         Ok(track)
     }
 
+    /// A library track's audio if it is already here, without fetching it:
+    /// for whoever wants to know what the file is called before deciding to
+    /// pay for it.
+    pub fn cached(&self, track: &Track) -> Option<PathBuf> {
+        if track.path.is_file() {
+            return Some(track.path.clone());
+        }
+        let origin = track.origin.as_ref()?;
+        self.get(&origin.source)?.cached(&origin.item, &cache_dir("audio"))
+    }
+
     /// A library track's audio: its own file while it is there, else fetched
     /// again from where it came from into a cache of `AUDIO_CACHE_GB`, the
     /// least lately heard going first.

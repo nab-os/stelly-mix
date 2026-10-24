@@ -21,6 +21,7 @@ use serde_json::Value;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
+use stelly_provider::Quality;
 
 /// Entries asked for at once while syncing.
 const CHUNK: usize = 200;
@@ -29,6 +30,9 @@ const CHUNK: usize = 200;
 pub const SOURCE: &str = "stelly";
 /// Extensions a fetched track may have been kept under.
 const KEPT: [&str; 8] = ["flac", "mp3", "ogg", "opus", "m4a", "wav", "aiff", "audio"];
+/// What entries mirrored before 0.4.0 are filed under: whichever of Stelly's
+/// providers had the audio, though their ids were already the server's own.
+const LEGACY: [&str; 2] = ["qobuz", "ytmusic"];
 
 pub struct Stelly {
     base: String,
@@ -37,19 +41,30 @@ pub struct Stelly {
 }
 
 impl Stelly {
+    /// A server at `base` with `token`, whatever the environment says.
+    pub fn new(base: &str, token: &str) -> Self {
+        let agent = ureq::Agent::config_builder()
+            .http_status_as_error(false)
+            .timeout_connect(Some(Duration::from_secs(10)))
+            .build()
+            .new_agent();
+        Self { base: base.trim().trim_end_matches('/').to_string(), token: token.trim().to_string(), agent }
+    }
+
+    /// Where it is pointed, for a window that shows it.
+    pub fn base(&self) -> &str {
+        &self.base
+    }
+
     /// The server named by `STELLY_SERVER` and `STELLY_TOKEN`, if both are
     /// set, in the environment or in stelly-mix's config.
     pub fn from_env() -> Option<Self> {
         let files: Vec<PathBuf> = config_dir().map(|d| vec![d.join("stelly.env")]).unwrap_or_default();
         let read = |key: &str| {
-            std::env::var(key).ok().filter(|v| !v.is_empty()).or_else(|| {
-                files.iter().find_map(|f| {
-                    std::fs::read_to_string(f).ok()?.lines().find_map(|l| {
-                        let (k, v) = l.trim().strip_prefix("export ").unwrap_or(l.trim()).split_once('=')?;
-                        (k.trim() == key).then(|| v.trim().trim_matches(['"', '\'']).to_string()).filter(|v| !v.is_empty())
-                    })
-                })
-            })
+            std::env::var(key)
+                .ok()
+                .filter(|v| !v.is_empty())
+                .or_else(|| files.iter().find_map(|file| from_file(file, key)))
         };
         let (base, token) = (read("STELLY_SERVER")?, read("STELLY_TOKEN")?);
         let agent = ureq::Agent::config_builder()
@@ -90,6 +105,18 @@ impl Stelly {
     /// Bring every entry of the server's mix library that this one lacks
     /// into it, telling `report` how far along it is; how many came.
     pub fn sync(&self, library: &Library, report: &dyn Fn(usize, usize)) -> Result<usize> {
+        // Entries of another analysis are read by neither side: mirroring
+        // them would store what `by_origin` then drops as stale, and every
+        // sync would fetch the whole library again saying nothing.
+        let version = self.status()?.version;
+        if version != crate::library::VERSION {
+            let behind = if version > crate::library::VERSION { "stelly-mix" } else { "Stelly's server" };
+            bail!(
+                "the server's mix analysis is version {version}, this stelly-mix reads {}: upgrade {behind} so the two agree",
+                crate::library::VERSION
+            );
+        }
+        library.adopt_sources(&LEGACY, SOURCE)?;
         let missing: Vec<i64> = self
             .library()?
             .into_iter()
@@ -100,8 +127,8 @@ impl Stelly {
         report(0, missing.len());
         for chunk in missing.chunks(CHUNK) {
             let entries: Vec<Entry> = self.post("/api/mix/tracks", &EntriesRequest { ids: chunk.to_vec() })?;
-            for entry in entries {
-                if entry.track.origin.is_none() {
+            for mut entry in entries {
+                if !adopt(&mut entry) {
                     continue;
                 }
                 library.put(&entry.track)?;
@@ -128,6 +155,32 @@ impl Stelly {
         self.get("/api/mix/analyse", &[])
     }
 
+    /// The cover art of each of `ids`, where the server's catalogue has one.
+    ///
+    /// The mirrored library holds none: an entry is the analysis, and
+    /// artwork is the catalogue's. So it is asked for when it is about to be
+    /// shown, and whoever asks is expected to remember the answer.
+    pub fn covers(&self, ids: &[i64]) -> Result<Vec<(i64, String)>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let tracks: Vec<Value> = self.post("/api/space/tracks", &serde_json::json!({ "ids": ids }))?;
+        Ok(tracks
+            .iter()
+            .filter_map(|track| {
+                let id = track["track_id"].as_i64()?;
+                let image = track["image"].as_str().filter(|url| !url.is_empty())?;
+                Some((id, image.to_string()))
+            })
+            .collect())
+    }
+
+    /// Stop the analysis the server is running, as it stands when it hears.
+    /// Wants `admin`, as starting one does.
+    pub fn stop(&self) -> Result<JobStatus> {
+        self.post("/api/mix/analyse/stop", &Value::Null)
+    }
+
     /// `analyse`, then follow it to the end, telling `report` each new line.
     pub fn analyse_and_wait(&self, selection: &Selection, report: &dyn Fn(&str)) -> Result<Stats> {
         self.analyse(selection)?;
@@ -148,13 +201,14 @@ impl Stelly {
     }
 
     /// The track's audio in up to `quality` into `cache`, unless some is
-    /// there: lossy, lossless or hires.
-    fn download(&self, item: &Item, cache: &Path, quality: &str) -> Result<PathBuf> {
+    /// there. The server answers with the best it has up to that, which for
+    /// a track with no lossless master is less.
+    fn download(&self, item: &Item, cache: &Path, quality: Quality) -> Result<PathBuf> {
         if let Some(file) = self.cached(item, cache) {
             return Ok(file);
         }
         std::fs::create_dir_all(cache).with_context(|| format!("creating {}", cache.display()))?;
-        let url: Value = self.get(&format!("/api/tracks/{}/url", item.id), &[("quality", quality.to_string())])?;
+        let url: Value = self.get(&format!("/api/tracks/{}/url", item.id), &[("quality", quality.as_str().to_string())])?;
         let url = url["url"].as_str().context("Stelly's server gave no URL")?;
         let mut response = ureq::get(url).call().with_context(|| format!("downloading {}", item.title))?;
         // What came, which is not always what was asked for.
@@ -167,7 +221,7 @@ impl Stelly {
             _ if mime.contains("mp4") || mime.contains("m4a") || mime.contains("aac") => "m4a",
             _ if mime.contains("wav") => "wav",
             _ if mime.contains("aiff") => "aiff",
-            _ if quality == "lossy" => "mp3",
+            _ if quality == Quality::Lossy => "mp3",
             _ => "flac",
         };
         let target = cache.join(format!("{}.{extension}", item.file_stem()));
@@ -194,6 +248,11 @@ fn answer<T: DeserializeOwned>(path: &str, mut response: ureq::http::Response<ur
     if status.as_u16() == 401 {
         bail!("Stelly's server refused the token in STELLY_TOKEN");
     }
+    // Since 2.0 a server whose database is busy says so rather than calling
+    // the token revoked; it is worth trying again, which 401 is not.
+    if status.as_u16() == 503 {
+        bail!("Stelly's server could not answer just now, try again: {}", body.trim());
+    }
     if !status.is_success() {
         let message = serde_json::from_str::<Value>(&body)
             .ok()
@@ -204,11 +263,65 @@ fn answer<T: DeserializeOwned>(path: &str, mut response: ureq::http::Response<ur
     serde_json::from_str(&body).with_context(|| format!("parsing {path}"))
 }
 
+/// One setting out of a `KEY=value` file, as `from_env` reads them:
+/// `export ` is allowed in front, and quotes around the value come off.
+fn from_file(file: &Path, key: &str) -> Option<String> {
+    std::fs::read_to_string(file).ok()?.lines().find_map(|line| {
+        let (k, v) = line.trim().strip_prefix("export ").unwrap_or(line.trim()).split_once('=')?;
+        (k.trim() == key).then(|| v.trim().trim_matches(['"', '\'']).to_string()).filter(|v| !v.is_empty())
+    })
+}
+
+/// Where the server and token are kept when they are not in the
+/// environment: `~/.config/stelly-mix/stelly.env`.
+pub fn config_file() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("stelly.env"))
+}
+
+/// Whether the environment is naming a server, in which case what is
+/// written to the config file will not be what the next run uses.
+pub fn env_overrides() -> bool {
+    ["STELLY_SERVER", "STELLY_TOKEN"].iter().any(|key| std::env::var(key).is_ok_and(|value| !value.is_empty()))
+}
+
+/// Keep `base` and `token` for every later run. The file is written whole,
+/// so anything else in it is not preserved: it holds these two settings.
+pub fn save(base: &str, token: &str) -> Result<PathBuf> {
+    let file = config_file().context("there is no home directory to keep settings in")?;
+    save_to(&file, base, token)?;
+    Ok(file)
+}
+
+fn save_to(file: &Path, base: &str, token: &str) -> Result<()> {
+    let dir = file.parent().context("a config file has a directory")?;
+    std::fs::create_dir_all(dir).with_context(|| format!("making {}", dir.display()))?;
+    let body = format!(
+        "# Written by stelly-mix. The environment wins over this file.\nSTELLY_SERVER={}\nSTELLY_TOKEN={}\n",
+        base.trim().trim_end_matches('/'),
+        token.trim()
+    );
+    let partial = file.with_extension(format!("{}.part", std::process::id()));
+    std::fs::write(&partial, body).with_context(|| format!("writing {}", partial.display()))?;
+    std::fs::rename(&partial, file).with_context(|| format!("moving {} into place", file.display()))?;
+    Ok(())
+}
+
 fn config_dir() -> Option<PathBuf> {
     let config = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
     Some(config.join("stelly-mix"))
+}
+
+/// File an entry as the server's own track, under the id it was asked for:
+/// one analysed before 2.0 comes back naming whichever provider had the
+/// audio, though its id was already the server's. Whether it can be filed at
+/// all: an entry with no origin is no source's.
+fn adopt(entry: &mut Entry) -> bool {
+    let Some(origin) = entry.track.origin.as_mut() else { return false };
+    origin.source = SOURCE.to_string();
+    origin.item.id = entry.id.to_string();
+    true
 }
 
 /// One of Stelly's tracks as an item.
@@ -248,15 +361,89 @@ impl Source for Stelly {
     }
 
     fn fetch(&self, item: &Item, cache: &Path) -> Result<PathBuf> {
-        self.download(item, cache, "lossless")
+        self.download(item, cache, Quality::Lossless)
     }
 
     fn fetch_for_analysis(&self, item: &Item, cache: &Path) -> Result<PathBuf> {
-        self.download(item, cache, "lossy")
+        self.download(item, cache, Quality::Lossy)
     }
 }
 
 /// The sources plain stelly-mix has: Stelly's server, when one is set.
 pub fn sources() -> Vec<Box<dyn Source>> {
     Stelly::from_env().map(|s| Box::new(s) as Box<dyn Source>).into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn what_is_saved_is_what_a_later_run_reads() {
+        let dir = std::env::temp_dir().join(format!("stelly-mix-env-{}", std::process::id()));
+        let file = dir.join("stelly.env");
+        save_to(&file, "https://music.example.org/", "  abc123  ").unwrap();
+
+        assert_eq!(from_file(&file, "STELLY_SERVER").as_deref(), Some("https://music.example.org"), "the trailing slash comes off");
+        assert_eq!(from_file(&file, "STELLY_TOKEN").as_deref(), Some("abc123"), "and the padding with it");
+        assert_eq!(from_file(&file, "STELLY_NOTHING"), None);
+
+        // Written whole each time, so the second save is not the first plus
+        // the second.
+        save_to(&file, "http://nas:7700", "zzz").unwrap();
+        assert_eq!(from_file(&file, "STELLY_SERVER").as_deref(), Some("http://nas:7700"));
+        assert_eq!(std::fs::read_to_string(&file).unwrap().lines().filter(|l| l.starts_with("STELLY_SERVER")).count(), 1);
+
+        // The forms a hand-written file might use are still read.
+        std::fs::write(&file, "export STELLY_TOKEN=\"quoted\"\n# a comment\nSTELLY_SERVER='single'\n").unwrap();
+        assert_eq!(from_file(&file, "STELLY_TOKEN").as_deref(), Some("quoted"));
+        assert_eq!(from_file(&file, "STELLY_SERVER").as_deref(), Some("single"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An entry as the server hands it over, from `source`.
+    fn entry(id: i64, source: &str, track_id: &str) -> Entry {
+        let track = serde_json::json!({
+            "path": format!("MGMT - Time To Pretend [{track_id}]"),
+            "size": 0, "modified": 0, "version": crate::library::VERSION,
+            "origin": { "source": source, "item": { "id": track_id, "artist": "MGMT", "title": "Time To Pretend" } },
+            "analysis": {
+                "seconds": 261.0, "grid": null, "key": null, "loudness": null,
+                "beats": [], "downbeats": [], "downbeat_confidence": 0.0, "phrases": [], "sections": []
+            },
+            "segments": []
+        });
+        Entry { id, track: serde_json::from_value(track).expect("a track") }
+    }
+
+    #[test]
+    fn an_entry_from_before_2_0_is_filed_under_stelly() {
+        // What ~/stelly-prod-data holds: the provider's name, the server's id.
+        let mut old = entry(16522, "qobuz", "16522");
+        assert!(adopt(&mut old));
+        assert_eq!(old.track.origin.unwrap().key(), "stelly:16522");
+    }
+
+    #[test]
+    fn adopting_an_entry_the_server_wrote_leaves_it_alone() {
+        let mut now = entry(16522, SOURCE, "16522");
+        let before = now.track.origin.clone();
+        assert!(adopt(&mut now));
+        assert_eq!(now.track.origin, before);
+    }
+
+    /// The id asked for wins: it is what the library looks the entry up by.
+    #[test]
+    fn an_entry_filed_under_a_provider_id_takes_the_one_it_came_for() {
+        let mut other = entry(16522, "qobuz", "99887766");
+        assert!(adopt(&mut other));
+        assert_eq!(other.track.origin.unwrap().key(), "stelly:16522");
+    }
+
+    #[test]
+    fn an_entry_with_no_origin_is_not_filed() {
+        let mut none = entry(16522, "qobuz", "16522");
+        none.track.origin = None;
+        assert!(!adopt(&mut none));
+    }
 }

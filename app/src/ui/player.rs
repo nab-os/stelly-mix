@@ -94,7 +94,7 @@ pub fn PlayerBar() -> Element {
                 onclick: move |_| {
                     document::eval("window.mixToggle && window.mixToggle();");
                 },
-                if (player.playing)() { "❚❚" } else { "▶" }
+                if (player.playing)() { {super::icons::pause()} } else { {super::icons::play()} }
             }
             div { class: "ellipsis",
                 match name {

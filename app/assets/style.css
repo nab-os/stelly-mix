@@ -1,15 +1,36 @@
-/* stelly-mix's window, on Stelly's palette. */
+/* stelly-mix's window.
+ *
+ * The palette is Stelly's, because they are the same family of tools; the
+ * density is not. Stelly is a thing you browse, so it breathes; this is a
+ * workbench you keep open beside the decks, so it packs in.
+ *
+ * Conventions, applied by hand throughout rather than tokenised:
+ *
+ *   type     10 / 11 / 12 / 13 (body) / 15 / 20, 600 for emphasis, and
+ *            tabular-nums wherever a digit changes in place.
+ *   space    a 2/4/6/8/10/12/14/18 rhythm, as flex `gap` rather than margins.
+ *   radius   6px a control, 8-10px a surface, 999px a pill, 50% a circle.
+ *   motion   120-200ms ease for a control, 260ms cubic-bezier(.2,0,0,1) for
+ *            anything that moves across the window. Only opacity and
+ *            transform: everything else repaints.
+ *
+ * A pill is a tag or a toggle. A rectangle is a verb.
+ */
 :root {
   --bg: #12131a;
   --panel: #1b1d26;
   --row: #23262f;
   --row-hover: #2c303b;
   --accent: #7aa2f7;
+  --accent-hover: #93b4f9;
+  /* The ink on an accent surface. Never white: on #7aa2f7 it is mud. */
+  --on-accent: #12131a;
   --text: #e5e7ef;
   --muted: #8b90a3;
   --good: #9ece6a;
   --warm: #e0af68;
   --danger: #f7768e;
+  --ease: cubic-bezier(0.2, 0, 0, 1);
 }
 
 * { box-sizing: border-box; }
@@ -19,14 +40,30 @@ body {
   background: var(--bg);
   color: var(--text);
   font: 13px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif;
+  /* A workbench, not a document: dragging a selection across it is almost
+     always a mis-click. Text worth copying asks for it back, below. */
   user-select: none;
 }
 
+/* Drawn by hand: WebKitGTK's own are overlays that fade out and composite
+   above everything, so they show through panels laid over them. */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--row-hover); border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
-input, select, button {
+/* Keyboard focus, which Stelly's window does not show at all. A ring rather
+   than a border: it costs no layout, so nothing shifts as focus moves. */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+:focus:not(:focus-visible) { outline: none; }
+
+/* --------------------------------------------------------------- controls */
+
+input, select, button, textarea {
   font: inherit;
   color: var(--text);
   background: var(--row);
@@ -34,7 +71,11 @@ input, select, button {
   border-radius: 6px;
   padding: 5px 9px;
 }
-input:focus, select:focus { outline: none; border-color: var(--accent); }
+/* A transparent border all the time means focus costs no layout shift. */
+input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+input { user-select: text; }
+input::placeholder { color: var(--muted); }
+
 /* WebKitGTK draws a native, light select unless told not to. */
 select {
   -webkit-appearance: none;
@@ -44,22 +85,173 @@ select {
   background-position: calc(100% - 13px) 50%, calc(100% - 8px) 50%;
   background-size: 5px 5px;
   background-repeat: no-repeat;
+  cursor: pointer;
 }
 option { background: var(--panel); color: var(--text); }
-input { user-select: text; }
-button { cursor: pointer; }
+
+button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  cursor: pointer;
+  transition: background 120ms ease, color 120ms ease, opacity 120ms ease;
+}
+/* Never a bare :hover on anything that can be disabled. */
 button:hover:not(:disabled) { background: var(--row-hover); }
 button:disabled { opacity: 0.45; cursor: default; }
-button.primary { background: var(--accent); color: #12131a; font-weight: 600; }
-button.primary:hover:not(:disabled) { background: #93b4f9; }
+/* An SVG with no width fills whatever holds it, so every icon is sized
+   here, not at the call site. Without this base rule one in a heading grew
+   to the height of its panel. */
+.icon { width: 18px; height: 18px; flex: none; display: block; }
+button .icon { width: 15px; height: 15px; }
+/* A tab's icon sits beside a word rather than inside a control, and reads
+   better with the extra pixel. */
+.tab .icon { width: 17px; height: 17px; }
+
+/* Four weights, and they have to look like four things. Filled is the one
+   verb a panel is for; outlined is a verb beside it; bare text is a verb
+   that should not compete with either; red is a verb you do not undo.
+   Everything used to be a grey rectangle, so Listen and Open read as the
+   same button. */
+
+/* 1. The panel's own verb. One per panel. */
+button.primary {
+  background: var(--accent);
+  color: var(--on-accent);
+  font-weight: 600;
+  box-shadow: 0 1px 0 rgba(0, 0, 0, 0.25);
+}
+button.primary:hover:not(:disabled) { background: var(--accent-hover); }
+button.primary:active:not(:disabled) { transform: translateY(1px); box-shadow: none; }
+
+/* 2. Beside it: the outline carries the shape, not a fill. */
+button.secondary {
+  background: transparent;
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px var(--row-hover);
+}
+button.secondary:hover:not(:disabled) { background: var(--row); box-shadow: inset 0 0 0 1px var(--muted); }
+
+/* 3. Quieter still: a verb that is one of many on a row. */
+button.ghost { background: transparent; color: var(--muted); }
+button.ghost:hover:not(:disabled) { background: var(--row); color: var(--text); }
+
+/* 4. Not undone, and says so only once pointed at: a column of red buttons
+   reads as a wall of warnings rather than one. */
+button.danger { background: transparent; color: var(--danger); box-shadow: inset 0 0 0 1px rgba(247, 118, 142, 0.4); }
+button.danger:hover:not(:disabled) { background: var(--danger); color: var(--on-accent); box-shadow: none; }
+
+/* The default, for anything that has not said which it is. */
+button:not(.primary):not(.secondary):not(.ghost):not(.danger):not(.chip):not(.icon-btn):not(.tab):not(.menu-item):not(.link) {
+  box-shadow: inset 0 0 0 1px var(--row-hover);
+  background: transparent;
+}
+
+/* A pill: a tag, or a toggle that is on or off. */
+.chip {
+  background: var(--row);
+  color: var(--muted);
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 11px;
+  flex: none;
+}
+.chip.active { background: var(--accent); color: var(--on-accent); }
+.chip.active:hover:not(:disabled) { background: var(--accent-hover); }
+.chip.danger { color: var(--danger); }
+.chip.danger:hover:not(:disabled) { background: var(--danger); color: var(--on-accent); }
+/* Armed: pressed once, and asking to be sure. */
+.chip.danger.armed { background: var(--danger); color: var(--on-accent); }
+
+/* Icon-only, round, and always carrying a title that says what it does. */
+.icon-btn {
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--muted);
+  flex: none;
+}
+.icon-btn:hover:not(:disabled) { background: var(--row-hover); color: var(--text); box-shadow: inset 0 0 0 1px var(--muted); }
+.icon-btn.active { color: var(--accent); }
+
+/* A verb that should not look like a button: dismissing, or going back. */
+.link {
+  all: unset;
+  cursor: pointer;
+  color: var(--muted);
+  font-size: 12px;
+}
+.link:hover { color: var(--accent); text-decoration: underline; }
+.link:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* Two or three options, exactly one of them lit. */
+.segmented { display: inline-flex; padding: 2px; border-radius: 8px; background: var(--row); gap: 2px; }
+.segmented button { background: transparent; color: var(--muted); padding: 3px 11px; border-radius: 6px; font-size: 12px; }
+.segmented button.active { background: var(--accent); color: var(--on-accent); font-weight: 600; }
+.segmented button.active:hover:not(:disabled) { background: var(--accent-hover); }
+
+/* ------------------------------------------------------------- utilities */
 
 .muted { color: var(--muted); }
 .small { font-size: 12px; }
 .error { color: var(--danger); }
+.notice { color: var(--accent); }
 .ellipsis { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .spacer { flex: 1; }
 .row-flex { display: flex; gap: 8px; align-items: center; }
 .num { font-variant-numeric: tabular-nums; }
+.hidden { display: none !important; }
+/* Opt back in where text is worth taking: a path, an error, a tracklist. */
+.selectable { user-select: text; }
+
+/* A heading over a panel or a column. */
+.eyebrow {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--muted);
+  font-weight: 600;
+}
+
+/* The tinted badge: a colour, and a wash of the same at 12%. */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  border-radius: 999px;
+  padding: 1px 9px;
+  font-size: 11px;
+  font-weight: 600;
+  flex: none;
+}
+.badge.good { color: var(--good); background: rgba(158, 206, 106, 0.12); }
+.badge.warm { color: var(--warm); background: rgba(224, 175, 104, 0.12); }
+.badge.bad { color: var(--danger); background: rgba(247, 118, 142, 0.12); }
+.badge.info { color: var(--accent); background: rgba(122, 162, 247, 0.14); }
+
+/* Something worth knowing before pressing the button, in a line of its own.
+   A badge on a block element stretches into a full-width pill, which reads
+   as a banner with a pill's padding; this is the banner, written as one. */
+.warning, .told {
+  border-radius: 6px;
+  padding: 8px 10px;
+  font-size: 12px;
+  margin: 0;
+}
+.warning { color: var(--warm); background: rgba(224, 175, 104, 0.1); border-left: 3px solid var(--warm); }
+.told { color: var(--accent); background: rgba(122, 162, 247, 0.1); border-left: 3px solid var(--accent); }
+
+/* Singing in it. Small enough to sit on a line in the library without
+   pushing the tempo and key out of their columns. */
+.badge.vocals { padding: 0 7px; font-size: 10px; letter-spacing: 0.04em; }
+
+/* Determinate progress. Filled by a scaleX rather than a width, so it moves
+   without a layout. */
+.bar { flex: 1; height: 4px; border-radius: 2px; background: var(--bg); overflow: hidden; }
+.bar > div { height: 100%; background: var(--accent); transform-origin: left; transition: transform 200ms linear; }
 
 /* ------------------------------------------------------------------ layout */
 
@@ -79,39 +271,117 @@ button.primary:hover:not(:disabled) { background: #93b4f9; }
   border-right: 1px solid var(--row);
 }
 .sidebar header { padding: 12px 12px 8px; display: flex; flex-direction: column; gap: 8px; }
-.brand { font-weight: 700; font-size: 15px; letter-spacing: 0.02em; }
+.brand { font-weight: 700; font-size: 15px; letter-spacing: 0.02em; display: flex; align-items: center; gap: 7px; }
 .brand span { color: var(--accent); }
+.brand .icon { width: 17px; height: 17px; color: var(--accent); }
 
-.tracks { overflow-y: auto; flex: 1; padding: 0 6px 8px; }
+/* The source pane's rows: dense, because the question is "which of these",
+   and a card answers that for four at a time where a row answers it for
+   forty. */
+.sources { overflow-y: auto; flex: 1; padding: 0 6px 8px; display: flex; flex-direction: column; gap: 1px; }
+.source-row {
+  display: grid;
+  grid-template-columns: 34px 1fr auto;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 6px;
+  border-radius: 6px;
+}
+.source-art { width: 34px; height: 34px; border-radius: 4px; background: var(--row-hover); overflow: hidden; }
+.source-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.source-of { min-width: 0; }
+.source-title { font-size: 12px; font-weight: 600; }
+.source-artist { font-size: 11px; color: var(--muted); }
+.source-facts { display: flex; gap: 5px; font-size: 10px; color: var(--muted); align-items: center; }
+.source-end { display: flex; align-items: center; gap: 4px; }
+.source-end .score { font-size: 12px; }
+.source-actions { display: flex; gap: 2px; }
+.source-actions .icon-btn { width: 22px; height: 22px; }
+.source-actions .icon-btn .icon { width: 12px; height: 12px; }
+/* A dot instead of a word, where a row has no room for one. */
+.dot { font-size: 14px; line-height: 1; }
+.dot.warm { color: var(--warm); }
+.dot.bad { color: var(--danger); }
+/* Full width across the pane. Only the metrics are set here: giving it a
+   background again would land after `.segmented button.active` at the same
+   specificity and quietly un-light the lit one. */
+.segmented.wide { display: flex; }
+.segmented.wide button { flex: 1; padding: 4px 4px; font-size: 11px; }
+
+/* The insert point: where the source pane puts things. */
+.gap.marked .gap-open { opacity: 1; color: var(--accent); }
+.gap.marked { position: relative; }
+.gap.marked::after {
+  content: "";
+  position: absolute;
+  left: 48px;
+  right: 0;
+  height: 2px;
+  background: var(--accent);
+  border-radius: 1px;
+}
+.gap.over .gap-open { opacity: 1; color: var(--accent); }
 .track-row {
   display: grid;
-  grid-template-columns: 1fr auto auto;
+  grid-template-columns: 1fr auto auto auto;
   gap: 8px;
   padding: 5px 8px;
   border-radius: 6px;
   cursor: pointer;
+  align-items: center;
 }
-.track-row:hover { background: var(--row-hover); }
 .track-row.selected { background: var(--row); box-shadow: inset 2px 0 var(--accent); }
 .track-row .bpm, .track-row .key { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
 
 .main { grid-row: 1; overflow-y: auto; min-width: 0; }
 .tabs { display: flex; gap: 4px; padding: 10px 18px 0; position: sticky; top: 0; background: var(--bg); z-index: 2; }
 .tab { background: transparent; border-radius: 6px 6px 0 0; color: var(--muted); }
+.tab:hover:not(:disabled) { background: var(--panel); color: var(--text); }
 .tab.active { color: var(--text); box-shadow: inset 0 -2px var(--accent); }
+.tab.active:hover:not(:disabled) { background: transparent; }
 .view { padding: 14px 18px 24px; display: flex; flex-direction: column; gap: 14px; }
+/* A view coming in has its content rise into place, which is enough: the
+   whole page moving as one layer is a lot to repaint. */
+.view { animation: view-in 180ms var(--ease) both; }
+@keyframes view-in { from { opacity: 0; transform: translateY(6px); } }
 
-.status { padding: 6px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--row); }
+.status { padding: 6px 12px; font-size: 12px; color: var(--muted); border-top: 1px solid var(--row); display: flex; align-items: center; gap: 8px; }
 .status .error { white-space: pre-wrap; }
+/* Working: two dots rather than a spinner, which would claim to know how
+   long this takes. */
+.working-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent);
+  flex: none;
+  animation: working 1.4s ease-in-out infinite;
+}
+@keyframes working { 0%, 100% { opacity: 1; } 50% { opacity: 0.25; } }
 
 /* ------------------------------------------------------------ track header */
 
 .title { font-size: 20px; font-weight: 650; line-height: 1.25; }
+.subtitle { color: var(--muted); font-size: 12px; }
 .facts { display: flex; flex-wrap: wrap; gap: 6px; }
 .fact { background: var(--row); border-radius: 999px; padding: 1px 9px; font-size: 12px; }
 .fact b { font-weight: 600; }
 .fact.good { color: var(--good); }
 .fact.warm { color: var(--warm); }
+
+/* A track's own page: what it is, large, before what can be done with it. */
+.detail-head { display: flex; gap: 14px; align-items: flex-start; }
+.detail-art {
+  width: 96px;
+  height: 96px;
+  flex: none;
+  border-radius: 8px;
+  background: var(--row-hover);
+  overflow: hidden;
+}
+.detail-art img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.detail-of { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.detail-artist { font-size: 14px; color: var(--muted); }
 
 /* --------------------------------------------------------------- waveform */
 
@@ -136,13 +406,16 @@ button.primary:hover:not(:disabled) { background: #93b4f9; }
 .wave .mark { stroke: var(--good); stroke-width: 1.5; }
 .wave .playhead { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--text); pointer-events: none; }
 .wave .loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); }
-.legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); }
+.legend { display: flex; gap: 14px; font-size: 12px; color: var(--muted); flex-wrap: wrap; }
 .legend i { display: inline-block; width: 10px; height: 2px; vertical-align: middle; margin-right: 5px; }
 
 /* ------------------------------------------------------------------ lists */
 
 .panel { background: var(--panel); border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 8px; }
-.panel h3 { margin: 0; font-size: 13px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }
+.panel h3 { margin: 0; font-size: 11px; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: 0.08em; display: flex; align-items: center; gap: 8px; }
+/* A sentence alongside a heading is still a sentence: the heading's caps
+   and tracking are for the one or two words that name the panel. */
+.panel h3 .hint { text-transform: none; letter-spacing: normal; font-weight: 400; }
 
 .list { display: flex; flex-direction: column; gap: 2px; }
 .item {
@@ -153,7 +426,6 @@ button.primary:hover:not(:disabled) { background: #93b4f9; }
   padding: 6px 8px;
   border-radius: 6px;
 }
-.item:hover { background: var(--row); }
 .item.chosen { background: var(--row); box-shadow: inset 2px 0 var(--good); }
 .score { font-weight: 700; font-variant-numeric: tabular-nums; }
 .score.high { color: var(--good); }
@@ -161,8 +433,86 @@ button.primary:hover:not(:disabled) { background: #93b4f9; }
 .score.low { color: var(--danger); }
 .item .name { font-weight: 550; }
 .item .detail { color: var(--muted); font-size: 12px; }
-.item .actions { display: flex; gap: 6px; }
+.item .actions { display: flex; gap: 6px; align-items: center; }
 .item button { padding: 3px 9px; font-size: 12px; }
+
+/* Numbered without a column of their own. */
+ol.list { counter-reset: step; list-style: none; margin: 0; padding: 0; }
+ol.list > .item::before {
+  counter-increment: step;
+  content: counter(step);
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+}
+
+/* The editor's head: the name is the biggest thing on it, because it is
+   what the set is. */
+.editor-head { gap: 10px; flex-wrap: wrap; }
+.set-name {
+  font-size: 16px;
+  font-weight: 600;
+  min-width: 220px;
+  background: transparent;
+  box-shadow: inset 0 -1px 0 var(--row);
+  border-radius: 0;
+  padding: 3px 2px;
+}
+.set-name:focus { box-shadow: inset 0 -2px 0 var(--accent); border-color: transparent; }
+.panel.inset { background: var(--bg); box-shadow: inset 0 0 0 1px var(--row); }
+
+/* The line between two tracks. Quiet until pointed at, because there is one
+   of these between every pair and a row of plus signs would shout. */
+.tracklist { position: relative; }
+.gap { list-style: none; height: 10px; display: flex; align-items: center; }
+.gap::before { content: none; }
+.gap-open {
+  width: 100%;
+  height: 10px;
+  padding: 0 0 0 48px;
+  gap: 6px;
+  justify-content: flex-start;
+  background: transparent;
+  box-shadow: none;
+  color: var(--muted);
+  font-size: 11px;
+  opacity: 0;
+  transition: opacity 120ms ease;
+}
+.gap-open .icon { width: 13px; height: 13px; }
+.gap-open span { opacity: 0.8; }
+.gap.open .gap-open,
+.gap:hover .gap-open,
+.gap-open:focus-visible { opacity: 1; }
+.gap.open .gap-open { color: var(--accent); }
+
+/* What to put there. */
+.picker { list-style: none; padding: 8px 8px 10px 48px; display: flex; flex-direction: column; gap: 8px; }
+.picker::before { content: none; }
+.picker .wide { flex: 1; }
+.picks { display: flex; flex-direction: column; gap: 2px; }
+.pick {
+  display: flex;
+  width: 100%;
+  gap: 10px;
+  justify-content: space-between;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+  padding: 4px 8px;
+}
+.pick:hover:not(:disabled) { background: var(--row-hover); }
+
+/* The alternatives for a slot, under the row they would replace. */
+.swap-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+  padding: 6px 8px 10px 58px;
+}
+.swap-panel .chip { cursor: pointer; }
+.swap-panel .chip:hover:not(:disabled) { background: var(--accent); color: var(--on-accent); }
 
 .form { display: flex; flex-wrap: wrap; gap: 12px; align-items: end; }
 .field { display: flex; flex-direction: column; gap: 4px; }
@@ -171,7 +521,137 @@ button.primary:hover:not(:disabled) { background: #93b4f9; }
 .field.wide { flex: 1; min-width: 240px; }
 .field.wide input { width: 100%; }
 
-.empty { color: var(--muted); padding: 40px 0; text-align: center; }
+/* Nothing here, and what to do about it. */
+.empty { color: var(--muted); padding: 40px 0; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.empty .icon { width: 26px; height: 26px; opacity: 0.4; }
+
+/* What a running job has printed, newest first. Monospace so the figures
+   in it line up down the pane. */
+.log {
+  background: var(--bg);
+  border-radius: 6px;
+  padding: 8px 10px;
+  max-height: 220px;
+  overflow-y: auto;
+  font: 11px/1.6 ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+.log-line { color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.log-line:first-child { color: var(--text); }
+
+/* ------------------------------------------------------------- tracklist */
+
+/* A track is a row and the mix out of it is the row under it. That is the
+   shape of the thing: a set is tracks with mixes between them, and putting
+   the mix's score and its two times on the right of a track row said
+   neither which pair it belonged to nor what it was. */
+.tracklist { display: flex; flex-direction: column; }
+/* The last column is fixed, not `auto`: the header's actions cell is empty
+   and would collapse, shifting every heading right of where its values sit. */
+.tl-head, .tl-track {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 104px 48px 60px 300px;
+  gap: 10px;
+  align-items: center;
+}
+.tl-head { padding: 0 8px 6px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.tl-track { padding: 7px 8px; border-radius: 6px; }
+.tl-n { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; font-size: 12px; }
+.tl-of { min-width: 0; }
+.tl-title { font-weight: 600; gap: 6px; }
+.tl-artist { color: var(--muted); font-size: 12px; }
+.tl-tempo, .tl-key, .tl-plays { font-size: 12px; }
+.tl-act { display: flex; gap: 2px; justify-content: flex-end; }
+.tl-act button { padding: 2px 8px; font-size: 11px; }
+.tl-act .icon { width: 13px; height: 13px; }
+
+/* The mix. Its score carries a bar in the same colour, so the column reads
+   as a shape down the set before any number is read. */
+.tl-mix { display: grid; grid-template-columns: 28px 54px minmax(0, 1fr) 300px; gap: 10px; align-items: center; padding: 2px 8px 8px; }
+.mix-act { justify-content: flex-end; }
+.mix-score {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 12px;
+  padding-left: 8px;
+  border-left: 3px solid currentColor;
+}
+.mix-of { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mix-act { display: flex; gap: 4px; align-items: center; }
+.mix-act button { padding: 2px 8px; font-size: 11px; }
+.mix-act .icon { width: 12px; height: 12px; }
+.insert { border: 1px dashed var(--row-hover); color: var(--muted); }
+.insert:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: transparent; }
+
+/* The panel a Swap or an insert opens, under the row it belongs to. */
+.tl-panel { margin: 0 8px 8px 38px; padding: 8px; border-radius: 8px; background: var(--bg); box-shadow: inset 0 0 0 1px var(--row); }
+.pick-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 46px 46px 46px;
+  gap: 8px;
+  padding: 0 8px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-align: right;
+}
+.pick {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 46px 46px 46px;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.pick > span:not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; }
+.pick .mean { font-weight: 700; }
+.pick:hover:not(:disabled) { background: var(--row-hover); }
+
+@media (hover: hover) and (pointer: fine) {
+  .tl-track:hover { background: var(--row); }
+  .tl-track .on-hover { visibility: hidden; }
+  .tl-track:hover .on-hover, .tl-track:focus-within .on-hover { visibility: visible; }
+  .tl-mix .on-hover { visibility: hidden; }
+  .tl-mix:hover .on-hover { visibility: visible; }
+}
+
+/* ---------------------------------------------------------- context menu */
+
+/* One menu at the shell that every row opens, rather than a popup per row:
+   one thing to dismiss, and a row stays three spans and a button however
+   many verbs it grows. */
+.menu-backdrop { position: fixed; inset: 0; z-index: 30; }
+.menu {
+  position: fixed;
+  z-index: 31;
+  min-width: 170px;
+  max-width: min(280px, calc(100vw - 16px));
+  max-height: 70vh;
+  overflow-y: auto;
+  padding: 4px;
+  background: var(--panel);
+  border: 1px solid var(--row);
+  border-radius: 8px;
+  box-shadow: 0 8px 28px rgba(0, 0, 0, 0.45);
+  cursor: default;
+}
+.menu-head { padding: 6px 9px 7px; border-bottom: 1px solid var(--row); margin-bottom: 4px; }
+.menu-head .name { font-weight: 600; }
+.menu-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border-radius: 5px;
+  padding: 6px 9px;
+}
+.menu-item:hover:not(:disabled) { background: var(--row-hover); }
+.menu-item.danger { color: var(--danger); }
+.menu-item:disabled { opacity: 0.35; }
+.menu-rule { height: 1px; background: var(--row); margin: 4px 0; }
 
 /* ----------------------------------------------------------------- player */
 
@@ -186,6 +666,28 @@ button.primary:hover:not(:disabled) { background: #93b4f9; }
   gap: 14px;
   align-items: center;
 }
-.player .play { width: 36px; height: 36px; border-radius: 50%; padding: 0; font-size: 14px; }
+.player .play { width: 36px; height: 36px; border-radius: 50%; padding: 0; }
+.player .play .icon { width: 17px; height: 17px; }
 .player .seek { width: 100%; accent-color: var(--accent); padding: 0; background: transparent; }
 .player .time { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+
+/* ------------------------------------------------------------------ hover */
+
+/* Reveal-on-hover is a pointer affordance; `visibility` rather than
+   `display` so a row does not reflow as the pointer crosses it. */
+@media (hover: hover) and (pointer: fine) {
+  .source-row:hover { background: var(--row-hover); }
+  .item:hover { background: var(--row); }
+  .item .on-hover { visibility: hidden; }
+  .item:hover .on-hover { visibility: visible; }
+  .item:focus-within .on-hover { visibility: visible; }
+}
+@media (hover: none) {
+  .item .on-hover { visibility: visible; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .view { animation: none; }
+  .working-dot { animation: none; }
+  button, .bar > div { transition: none; }
+}

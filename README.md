@@ -103,6 +103,75 @@ other; peaks are held at -1 dBFS.
 
 Building it wants a C++ compiler and libclang, for Signalsmith Stretch.
 
+`vocals` listens through the library for singing and keeps what it hears:
+
+```sh
+cargo run --release -- vocals     # 5004 tracks in about two seconds
+```
+
+Nothing is re-analysed. Every phrase already holds CLAP's audio embedding,
+so a phrase is scored by how much nearer it sits to "a song with singing, a
+voice, vocals, lyrics" than to "an instrumental piece, no singing, no
+voice" — both asked together, because CLAP has no "not": ask it for "no
+human voice" and an orchestra outscores a singer.
+
+Tracks with a voice in them get a **vocals** badge on their line, and a
+transition is scored down where the mix would put two voices over each
+other — heavily when both sides sing, lightly when only one does, which is
+how a great many mixes are made. Over the best 30 ways out of a sung track,
+weighing voices took the mean clash from 0.51 to 0.12 and changed nine of
+the best ten destinations.
+
+It is a guess and a narrow one: measured on tracks whose answer is not in
+doubt, singing scored −0.049 and up while instrumentals reached −0.115, so
+the line sits between them with little room. A dense, distorted mix hides
+its voice from CLAP — a nu-metal track with shouted vocals throughout
+landed just over the line. The badge says it is a guess; the planner uses
+the score rather than the verdict, so it degrades rather than flips.
+
+## Handing a set over
+
+stelly-mix plans; the set is played somewhere else. `export` writes a folder
+holding the tracks in play order, a playlist, a cue sheet, a rendered
+reference mix, and the mix points as cues the other program will show:
+
+```sh
+cargo run --release -- sets                               # what is kept
+cargo run --release -- export "Friday night" --target mixxx --into ~/Music
+```
+
+| target | what it writes |
+|---|---|
+| `rekordbox` | `DJ_PLAYLISTS` XML: beat grid, key and memory cues, plus a playlist |
+| `traktor` | `collection.nml`: the same in Traktor's shape, cues in milliseconds |
+| `engine` | the playlist, plus the Rekordbox XML its conversion tool reads |
+| `serato` | the playlist, and the cues written into the files themselves |
+| `mixxx` | the same tags — Mixxx reads Serato's natively |
+| `plain` | the playlist, a cue sheet and the tracks |
+
+### Cues in the files
+
+Serato keeps hot cues inside the audio files rather than in a library of its
+own, and **Mixxx and VirtualDJ read the same tags** — so the mix points are
+written there too, as `Serato Markers2`: a `SERATO_MARKERS_V2` Vorbis
+comment in a FLAC, a `GEOB` frame in an MP3. One blob, three programs, and
+nothing of yours is touched: the tags go into the copies in the export
+folder.
+
+Mixxx will not take a Rekordbox XML — it wants a USB export built by
+Rekordbox itself — so this is how the planning reaches it.
+
+The format is not published by Serato; the layout used here is the
+reverse-engineered one [serato-tags][st] documents and Mixxx's own importer
+is written against. It is encoded twice over, which is the part that catches
+people out: two version bytes, then the markers themselves base64'd and
+newline-broken, then a null and padding. What is written is checked against
+[`triseratops`][tr], an independent reader, so the test fails if the bytes
+drift from what a real program would accept.
+
+[st]: https://github.com/Holzhaus/serato-tags
+[tr]: https://crates.io/crates/triseratops
+
 ## Stelly's server
 
 [Stelly](https://github.com/nab-os/stelly)'s server can hold the mix analysis
@@ -123,10 +192,13 @@ cargo run --release -- server-analyse favourites            # the family's liked
 cargo run --release -- server-analyse "mood/dark rolling techno?n=200"
 cargo run --release -- server-analyse "artist-name/Lun?n=30" # its tracks and their nearest
 cargo run --release -- server-analyse "around/<id>?n=50"     # or genre/<genres>?n=<limit>
+cargo run --release -- server-stop                           # stop the one it is running
 ```
 
 It follows the server's progress, then syncs. The app's Index box takes the
-same, written `stelly:album/<id>` and so on.
+same, written `stelly:album/<id>` and so on. An analysis is hours of
+downloading and CPU, and the server keeps running it after the command that
+started it has gone; `server-stop` is how it is called off.
 
 `sync` brings its entries in as `stelly:<id>` tracks, by the server's own
 ids, and the server is then the `stelly` source: their audio comes from the
@@ -135,9 +207,17 @@ track is played, mixed or rendered, into the same capped cache as any
 source's. The app syncs at start. The two settings can also go in
 `~/.config/stelly-mix/stelly.env`.
 
-A library synced from a Stelly before 2.0 has them as `qobuz:<id>`, the same
-ids: `stelly-mix rename-source qobuz stelly` files them under the new name,
-rather than syncing them all again beside the old.
+A library synced from a Stelly before 2.0 has them under the provider that
+had the audio, `qobuz:<id>`, by the same ids. `sync` adopts those by itself,
+once, rather than fetching them all again beside the old; entries analysed
+before 2.0 still name their provider where the server stored them, and are
+filed under the id they were asked for whatever they say.
+`stelly-mix rename-source qobuz stelly` does the same by hand, for a source
+`sync` does not know about.
+
+`sync` reads the server's analysis version first and stops if it is not the
+one this stelly-mix writes, since neither side would read the other's
+entries.
 
 ## The app
 

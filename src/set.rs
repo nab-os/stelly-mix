@@ -33,6 +33,9 @@ pub struct Options {
     /// of the set: the plan maximises the average, which one bad transition
     /// can hide in.
     pub min_transition: f64,
+    /// Tracks the plan may not use, by their place in the library: what a
+    /// set already holds before the part being planned again.
+    pub avoid: Vec<usize>,
 }
 
 
@@ -58,6 +61,7 @@ impl Default for Options {
             min_play: 90.0,
             like: None,
             min_transition: MIN_TRANSITION,
+            avoid: Vec::new(),
         }
     }
 }
@@ -107,7 +111,7 @@ pub fn plan(library: &[Track], first: usize, options: &Options) -> Option<Plan> 
             let entered = plan.transitions.last().map_or(0.0, |t| playing.segments[t.into].start);
             let liked = |i: usize| options.like.as_ref().map_or(1.0, |like| like[i]);
             let steps = transitions::from_allowed(playing, library, &ranking, |i, next| {
-                let played = plan.tracks.iter().any(|&p| p == i || same_recording(&library[p], next));
+                let played = plan.tracks.iter().chain(&options.avoid).any(|&p| p == i || same_recording(&library[p], next));
                 !played && liked(i) >= LIKE_FLOOR
             });
             let mut extended = false;
