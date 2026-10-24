@@ -221,6 +221,34 @@ pub fn render_set(loaded: &Loaded, plan: &Plan) -> Result<Clip> {
     })
 }
 
+/// What was liked on Stelly, newest first, as the pane lists it.
+pub struct LikedNow {
+    /// Library keys of those analysed, the newest `limit`.
+    pub keys: Vec<String>,
+    /// Liked but not analysed yet: the server has them queued.
+    pub waiting: usize,
+    /// Brought from the server just now: the library wants reading again.
+    pub brought: usize,
+}
+
+/// What the family liked on Stelly, newest first. Those the server has
+/// analysed since the last sync are brought in on the way.
+pub fn liked(loaded: &Loaded, limit: usize) -> Result<LikedNow> {
+    let server = stelly().context("no Stelly server is set: connect one in Settings")?;
+    let liked = server.liked(0)?;
+    let here: std::collections::HashSet<String> = loaded.tracks.iter().filter_map(|t| Some(t.origin.as_ref()?.key())).collect();
+    let missing: Vec<i64> = liked.iter().filter(|l| l.analysed && !here.contains(&l.key())).map(|l| l.track_id).collect();
+    let brought = if missing.is_empty() { 0 } else { server.bring(&library()?, &missing, &|_, _| {})? };
+    let keys = liked
+        .iter()
+        .filter(|l| here.contains(&l.key()) || (l.analysed && brought > 0))
+        .map(|l| l.key())
+        .take(limit)
+        .collect();
+    let waiting = liked.iter().filter(|l| !l.analysed && !here.contains(&l.key())).count();
+    Ok(LikedNow { keys, waiting, brought })
+}
+
 /// Library tracks whose name holds every word of `words`, best match first
 /// by name length: a short name containing the words is more likely the one
 /// meant than a long one that happens to.
