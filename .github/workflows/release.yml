@@ -1,0 +1,224 @@
+# Desktop packages, and the command line beside them.
+#
+# Runs on every push so a break shows up when it is made rather than at a
+# release, and attaches the artifacts to the release when the push is a tag.
+name: release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  # The toolchain the code is built with here and in Stelly: a newer
+  # clippy's new lints are a deliberate bump, not a red build overnight.
+  RUST_VERSION: "1.96.0"
+  DX_VERSION: "0.7.10"
+  MAINTAINER: "nab-os <9805355+nab-os@users.noreply.github.com>"
+
+jobs:
+  linux:
+    name: ubuntu ${{ matrix.ubuntu }}
+    runs-on: ubuntu-${{ matrix.ubuntu }}
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two .debs, because each links against its own release's webkit and
+        # glibc. `ubuntu-latest` is deliberately not used: it moves under you.
+        ubuntu: ["24.04", "26.04"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # The window draws into WebKitGTK; libxdo and libappindicator come in
+      # through tao. clang and libclang build Signalsmith Stretch, the
+      # keylock renders are pitched back with.
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential pkg-config dpkg-dev file clang libclang-dev \
+            libwebkit2gtk-4.1-dev libgtk-3-dev libsoup-3.0-dev \
+            libxdo-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      # Saved from main only: a cache written on a pull request is scoped to
+      # its merge ref and dead once it merges, and these targets are large.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ubuntu-${{ matrix.ubuntu }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      # Prebuilt: `cargo install dioxus-cli` is a ten minute build.
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall -y --locked dioxus-cli@${{ env.DX_VERSION }}
+
+      # A tag is the version. Anything else takes the crate version plus a
+      # build id, because Cargo.toml is not bumped per commit and every
+      # artifact would otherwise be called 0.5.0 forever. `+build<n>.g<sha>`
+      # is a valid Debian upstream version and sorts after the plain one.
+      - name: Work out the version
+        id: v
+        run: |
+          CRATE=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${CRATE}+build${{ github.run_number }}.g$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "packaging $VERSION for ubuntu ${{ matrix.ubuntu }}"
+
+      # --cargo-args needs the `=` form: a value starting with `-` is read as
+      # the next flag otherwise.
+      - name: Bundle the desktop app
+        working-directory: app
+        run: |
+          dx bundle --release --platform linux \
+            --package-types deb --package-types appimage \
+            --cargo-args="--locked" \
+            --out-dir "$GITHUB_WORKSPACE/staging"
+
+      # The command line is the same library without the window, and is what
+      # `vocals`, `sync` and `export` are run from.
+      - name: Build the command line
+        run: cargo build --release --locked --bin stelly-mix
+
+      - name: Test
+        run: cargo test --release --locked --workspace
+
+      # dx leaves Depends and Maintainer blank; this fills them in, working
+      # Depends out with dpkg-shlibdeps against this runner's release.
+      - name: Finish the .deb
+        run: |
+          mkdir -p dist
+          chmod +x .github/scripts/finish-deb.sh
+          dpkg-deb -R staging/*_amd64.deb debroot
+          .github/scripts/finish-deb.sh debroot \
+            "dist/stelly-mix_${{ steps.v.outputs.version }}_amd64.ubuntu-${{ matrix.ubuntu }}.deb" \
+            "$MAINTAINER" "${{ steps.v.outputs.version }}"
+          rm -f staging/*_amd64.deb
+
+      - name: Collect the AppImage and the command line
+        run: |
+          for f in staging/*.AppImage; do
+            [ -e "$f" ] || continue
+            mv "$f" "dist/stelly-mix-${{ steps.v.outputs.version }}-x86_64.ubuntu-${{ matrix.ubuntu }}.AppImage"
+          done
+          tar -czf "dist/stelly-mix-cli-${{ steps.v.outputs.version }}-x86_64.ubuntu-${{ matrix.ubuntu }}.tar.gz" \
+            -C target/release stelly-mix
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-${{ matrix.ubuntu }}
+          path: dist/*
+
+  windows:
+    name: windows
+    # Pinned for the same reason the Ubuntu images are: `windows-latest`
+    # moves under you. Unlike the .debs there is only one, because a Windows
+    # binary is not tied to the image it was built on the way glibc ties a
+    # Linux one.
+    runs-on: windows-2025
+    env:
+      # Signalsmith Stretch's bindings are generated by bindgen, which wants
+      # libclang. The runner has LLVM but does not put it on PATH.
+      LIBCLANG_PATH: "C:\\Program Files\\LLVM\\bin"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.RUST_VERSION }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-2025
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - uses: cargo-bins/cargo-binstall@main
+      - run: cargo binstall -y --locked dioxus-cli@${{ env.DX_VERSION }}
+
+      # bash throughout, so this reads the same as the Linux job above. Git
+      # bash is on every Windows runner.
+      - name: Work out the version
+        id: v
+        shell: bash
+        run: |
+          CRATE=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+          if [ "${{ github.ref_type }}" = "tag" ]; then
+            VERSION="${GITHUB_REF_NAME#v}"
+          else
+            VERSION="${CRATE}+build${{ github.run_number }}.g$(git rev-parse --short HEAD)"
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "packaging $VERSION for windows"
+
+      # Both installers: the NSIS .exe is what a person downloads, the .msi
+      # is what anyone deploying it by policy will want. dx names them from
+      # the crate version, not from the one above — which is what keeps the
+      # MSI valid, since WiX refuses a version with a build tag in it.
+      - name: Bundle the desktop app
+        shell: bash
+        working-directory: app
+        run: |
+          dx bundle --release --platform windows \
+            --package-types msi --package-types nsis \
+            --cargo-args="--locked" \
+            --out-dir "$GITHUB_WORKSPACE/staging"
+
+      - name: Build the command line
+        run: cargo build --release --locked --bin stelly-mix
+
+      # The only place the Windows behaviour is checked at all: a drive
+      # letter and a backslash reach the export writers here and nowhere
+      # else.
+      - name: Test
+        run: cargo test --release --locked --workspace
+
+      - name: Collect
+        shell: bash
+        run: |
+          mkdir -p dist
+          for f in staging/*.exe; do
+            [ -e "$f" ] || continue
+            mv "$f" "dist/stelly-mix-${{ steps.v.outputs.version }}-x64-setup.exe"
+          done
+          for f in staging/*.msi; do
+            [ -e "$f" ] || continue
+            mv "$f" "dist/stelly-mix-${{ steps.v.outputs.version }}-x64.msi"
+          done
+          7z a "dist/stelly-mix-cli-${{ steps.v.outputs.version }}-x86_64-windows.zip" \
+            "./target/release/stelly-mix.exe"
+          ls -lh dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: dist/*
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      # No pattern: every job's artifacts, which is now both Ubuntus and
+      # Windows, each in a directory of its own under artifacts/.
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - run: ls -lhR artifacts
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

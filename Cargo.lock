@@ -4792,7 +4792,7 @@ dependencies = [
 
 [[package]]
 name = "stelly-mix"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "argh",
@@ -4813,7 +4813,7 @@ dependencies = [
 
 [[package]]
 name = "stelly-mix-app"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "dioxus",
