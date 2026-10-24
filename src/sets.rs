@@ -122,6 +122,20 @@ impl Planned {
     }
 }
 
+/// How well a track would sit somewhere: its two sides, and their mean.
+///
+/// Both are reported rather than only the mean, because a swap changes two
+/// mixes and which of them it spoils is the thing worth seeing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Fit {
+    pub key: String,
+    /// Out of the track before, where there is one.
+    pub coming_in: Option<f64>,
+    /// Into the track after, where there is one.
+    pub going_out: Option<f64>,
+    pub mean: f64,
+}
+
 /// What a kept set came to against the library as it is now.
 pub struct Resolved {
     pub plan: Plan,
@@ -278,7 +292,7 @@ impl Set {
     /// Ranked from the track before first, then only that shortlist is tried
     /// into the one after: scoring every track in the library against both
     /// neighbours is two passes over thousands of tracks for a menu of six.
-    pub fn alternatives(&self, at: usize, library: &[Track], max_stretch: f64, sound: SoundScale, limit: usize) -> Vec<(String, f64)> {
+    pub fn alternatives(&self, at: usize, library: &[Track], max_stretch: f64, sound: SoundScale, limit: usize) -> Vec<Fit> {
         let resolved = self.resolved(library);
         let before = at.checked_sub(1).and_then(|k| resolved.get(k).copied().flatten());
         let after = resolved.get(at + 1).copied().flatten();
@@ -288,7 +302,7 @@ impl Set {
     /// What would go *between* the track at `at` and the one before it,
     /// best first: the same question as `alternatives`, asked of a gap
     /// rather than a slot, so nothing is displaced.
-    pub fn fits_between(&self, at: usize, library: &[Track], max_stretch: f64, sound: SoundScale, limit: usize) -> Vec<(String, f64)> {
+    pub fn fits_between(&self, at: usize, library: &[Track], max_stretch: f64, sound: SoundScale, limit: usize) -> Vec<Fit> {
         let resolved = self.resolved(library);
         let before = at.checked_sub(1).and_then(|k| resolved.get(k).copied().flatten());
         let after = resolved.get(at).copied().flatten();
@@ -308,7 +322,7 @@ impl Set {
         max_stretch: f64,
         sound: SoundScale,
         limit: usize,
-    ) -> Vec<(String, f64)> {
+    ) -> Vec<Fit> {
         const SHORTLIST: usize = 80;
         let Some(&first) = self.tracks.first().and_then(|key| index_of(library, key)).as_ref() else {
             return Vec::new();
@@ -338,25 +352,32 @@ impl Set {
             (None, None) => return Vec::new(),
         };
 
-        let mut scored: Vec<(String, f64)> = shortlist
+        let mut scored: Vec<Fit> = shortlist
             .into_iter()
             .filter_map(|(candidate, incoming)| {
-                let score = match (before, after) {
-                    // Both neighbours: the slot is only as good as its worse side.
-                    (Some(_), Some(after)) => {
-                        let out = crate::transitions::from_allowed(&library[candidate], library, &ranking, |j, _| j == after)
+                // Both sides matter: a track that comes in beautifully and
+                // goes out badly is not a good slot, and the mean alone
+                // hides which of the two is the problem.
+                let out = match after {
+                    Some(after) => Some(
+                        crate::transitions::from_allowed(&library[candidate], library, &ranking, |j, _| j == after)
                             .into_iter()
                             .next()?
-                            .score;
-                        (incoming + out) / 2.0
-                    }
-                    _ => incoming,
+                            .score,
+                    ),
+                    None => None,
                 };
-                let key = library[candidate].origin.as_ref()?.key();
-                Some((key, score))
+                let coming_in = before.map(|_| incoming);
+                let mean = match (coming_in, out) {
+                    (Some(a), Some(b)) => (a + b) / 2.0,
+                    (Some(a), None) => a,
+                    (None, Some(b)) => b,
+                    (None, None) => return None,
+                };
+                Some(Fit { key: library[candidate].origin.as_ref()?.key(), coming_in, going_out: out, mean })
             })
             .collect();
-        scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+        scored.sort_by(|a, b| b.mean.total_cmp(&a.mean));
         scored.truncate(limit);
         scored
     }
@@ -672,13 +693,14 @@ mod tests {
         let set = cut(&[0, 1, 2], &library);
         let offered = set.alternatives(1, &library, 0.06, SoundScale::of(&library), 5);
         assert!(!offered.is_empty(), "the library has other tracks to offer");
-        for (key, _) in &offered {
-            assert_ne!(key, "stelly:1", "the slot's neighbours are not alternatives to it");
-            assert_ne!(key, "stelly:3");
-            assert_ne!(key, "stelly:2", "nor is the track already in the slot");
+        for fit in &offered {
+            assert_ne!(fit.key, "stelly:1", "the slot's neighbours are not alternatives to it");
+            assert_ne!(fit.key, "stelly:3");
+            assert_ne!(fit.key, "stelly:2", "nor is the track already in the slot");
+            assert!(fit.coming_in.is_some() && fit.going_out.is_some(), "a middle slot has two sides");
         }
         // Best first.
-        assert!(offered.windows(2).all(|pair| pair[0].1 >= pair[1].1));
+        assert!(offered.windows(2).all(|pair| pair[0].mean >= pair[1].mean));
     }
 
     #[test]
@@ -721,10 +743,10 @@ mod tests {
         let set = cut(&[0, 1, 2], &library);
         let offered = set.fits_between(1, &library, 0.06, SoundScale::of(&library), 5);
         assert!(!offered.is_empty());
-        for (key, _) in &offered {
-            assert!(!set.tracks.contains(key), "{key} is already in the set");
+        for fit in &offered {
+            assert!(!set.tracks.contains(&fit.key), "{} is already in the set", fit.key);
         }
-        assert!(offered.windows(2).all(|p| p[0].1 >= p[1].1), "best first");
+        assert!(offered.windows(2).all(|p| p[0].mean >= p[1].mean), "best first");
     }
 
     #[test]

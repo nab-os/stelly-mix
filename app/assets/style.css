@@ -538,6 +538,86 @@ ol.list > .item::before {
 .log-line { color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 .log-line:first-child { color: var(--text); }
 
+/* ------------------------------------------------------------- tracklist */
+
+/* A track is a row and the mix out of it is the row under it. That is the
+   shape of the thing: a set is tracks with mixes between them, and putting
+   the mix's score and its two times on the right of a track row said
+   neither which pair it belonged to nor what it was. */
+.tracklist { display: flex; flex-direction: column; }
+/* The last column is fixed, not `auto`: the header's actions cell is empty
+   and would collapse, shifting every heading right of where its values sit. */
+.tl-head, .tl-track {
+  display: grid;
+  grid-template-columns: 28px minmax(0, 1fr) 104px 48px 60px 300px;
+  gap: 10px;
+  align-items: center;
+}
+.tl-head { padding: 0 8px 6px; font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.tl-track { padding: 7px 8px; border-radius: 6px; }
+.tl-n { color: var(--muted); font-variant-numeric: tabular-nums; text-align: right; font-size: 12px; }
+.tl-of { min-width: 0; }
+.tl-title { font-weight: 600; gap: 6px; }
+.tl-artist { color: var(--muted); font-size: 12px; }
+.tl-tempo, .tl-key, .tl-plays { font-size: 12px; }
+.tl-act { display: flex; gap: 2px; justify-content: flex-end; }
+.tl-act button { padding: 2px 8px; font-size: 11px; }
+.tl-act .icon { width: 13px; height: 13px; }
+
+/* The mix. Its score carries a bar in the same colour, so the column reads
+   as a shape down the set before any number is read. */
+.tl-mix { display: grid; grid-template-columns: 28px 54px minmax(0, 1fr) 300px; gap: 10px; align-items: center; padding: 2px 8px 8px; }
+.mix-act { justify-content: flex-end; }
+.mix-score {
+  font-variant-numeric: tabular-nums;
+  font-weight: 700;
+  font-size: 12px;
+  padding-left: 8px;
+  border-left: 3px solid currentColor;
+}
+.mix-of { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mix-act { display: flex; gap: 4px; align-items: center; }
+.mix-act button { padding: 2px 8px; font-size: 11px; }
+.mix-act .icon { width: 12px; height: 12px; }
+.insert { border: 1px dashed var(--row-hover); color: var(--muted); }
+.insert:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); background: transparent; }
+
+/* The panel a Swap or an insert opens, under the row it belongs to. */
+.tl-panel { margin: 0 8px 8px 38px; padding: 8px; border-radius: 8px; background: var(--bg); box-shadow: inset 0 0 0 1px var(--row); }
+.pick-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 46px 46px 46px;
+  gap: 8px;
+  padding: 0 8px 4px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted);
+  text-align: right;
+}
+.pick {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 46px 46px 46px;
+  gap: 8px;
+  width: 100%;
+  background: transparent;
+  box-shadow: none;
+  text-align: left;
+  padding: 5px 8px;
+  font-size: 12px;
+}
+.pick > span:not(:first-child) { text-align: right; font-variant-numeric: tabular-nums; }
+.pick .mean { font-weight: 700; }
+.pick:hover:not(:disabled) { background: var(--row-hover); }
+
+@media (hover: hover) and (pointer: fine) {
+  .tl-track:hover { background: var(--row); }
+  .tl-track .on-hover { visibility: hidden; }
+  .tl-track:hover .on-hover, .tl-track:focus-within .on-hover { visibility: visible; }
+  .tl-mix .on-hover { visibility: hidden; }
+  .tl-mix:hover .on-hover { visibility: visible; }
+}
+
 /* ---------------------------------------------------------- context menu */
 
 /* One menu at the shell that every row opens, rather than a popup per row:

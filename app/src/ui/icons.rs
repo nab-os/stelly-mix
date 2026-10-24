@@ -111,10 +111,6 @@ pub fn down() -> Element {
     stroked(rsx! { path { d: "M12 5v13M6 12l6 6 6-6" } })
 }
 
-/// Taking a track out of the set.
-pub fn remove() -> Element {
-    stroked(rsx! { path { d: "M5 12h14" } })
-}
 
 
 /// The server the music comes from.

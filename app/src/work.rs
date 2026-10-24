@@ -375,8 +375,11 @@ pub fn search_for_gap(
     words: &str,
     limit: usize,
 ) -> Vec<(String, String, Option<f64>)> {
-    let fits: std::collections::HashMap<String, f64> =
-        set.fits_between(at, &loaded.tracks, set.planned.max_stretch, loaded.scale, 400).into_iter().collect();
+    let fits: std::collections::HashMap<String, f64> = set
+        .fits_between(at, &loaded.tracks, set.planned.max_stretch, loaded.scale, 400)
+        .into_iter()
+        .map(|fit| (fit.key, fit.mean))
+        .collect();
     let wanted: Vec<String> = words.split_whitespace().map(str::to_lowercase).collect();
     let mut found: Vec<(String, String, Option<f64>)> = loaded
         .tracks
@@ -422,12 +425,12 @@ pub fn replan_set(loaded: &Loaded, mut set: stelly_mix::sets::Set, at: usize) ->
 }
 
 /// What else could sit at `at` in `set`, best first.
-pub fn alternatives_for(loaded: &Loaded, set: &stelly_mix::sets::Set, at: usize, limit: usize) -> Vec<(String, f64)> {
+pub fn alternatives_for(loaded: &Loaded, set: &stelly_mix::sets::Set, at: usize, limit: usize) -> Vec<stelly_mix::sets::Fit> {
     set.alternatives(at, &loaded.tracks, set.planned.max_stretch, loaded.scale, limit)
 }
 
 /// What would go in the gap before `at`, best first.
-pub fn fits_between(loaded: &Loaded, set: &stelly_mix::sets::Set, at: usize, limit: usize) -> Vec<(String, f64)> {
+pub fn fits_between(loaded: &Loaded, set: &stelly_mix::sets::Set, at: usize, limit: usize) -> Vec<stelly_mix::sets::Fit> {
     set.fits_between(at, &loaded.tracks, set.planned.max_stretch, loaded.scale, limit)
 }
 

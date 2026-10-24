@@ -354,6 +354,9 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
     let unsaved = editing.unsaved();
 
     let resolved = set.resolve(&library.0.tracks);
+    // The set holds the first track's tempo; every other row says how far
+    // it is being stretched to get there.
+    let master = resolved.plan.tracks.first().and_then(|&at| library.0.tracks[at].bpm());
 
     let keep = move |name: String, as_copy: bool| {
         let (mut open, mut failed, mut busy, mut saving_as) = (open, failed, busy, saving_as);
@@ -510,65 +513,120 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
                         }
                     }
                 }
-                ol { class: "list tracklist",
-                    GapLine { at: 0, total: resolved.plan.tracks.len(), picking, open, library: library.clone(), edit }
+                div { class: "tracklist",
+                    div { class: "tl-head",
+                        span { class: "tl-n" }
+                        span { "TRACK" }
+                        span { "TEMPO" }
+                        span { "KEY" }
+                        span { "PLAYS" }
+                        span { class: "tl-act" }
+                    }
                     for (k, &at) in resolved.plan.tracks.iter().enumerate() {
                         {
                             let track = &library.0.tracks[at];
                             let step = resolved.plan.transitions.get(k);
                             let last = k + 1 == resolved.plan.tracks.len();
                             let library = library.clone();
+                            let (artist, title) = match track.origin.as_ref() {
+                                Some(o) => (o.item.artist.clone(), o.item.title.clone()),
+                                None => (String::new(), track.name()),
+                            };
+                            let stretch = master.map(|m| track.bpm().map_or(0.0, |b| (m / b - 1.0) * 100.0));
                             rsx! {
-                                li { class: "item",
-                                    div {
-                                        div { class: "name ellipsis", "{track.name()}" }
-                                        div { class: "detail row-flex",
+                                div { class: "tl-track",
+                                    span { class: "tl-n", "{k + 1}" }
+                                    div { class: "tl-of",
+                                        div { class: "tl-title row-flex",
+                                            span { "{title}" }
                                             {super::vocals_badge(track)}
-                                            span { "{track.bpm().unwrap_or(0.0):.1} BPM" }
-                                            if let Some(key) = track.analysis.key.as_ref() { span { "· {key.camelot}" } }
-                                            if let Some(step) = step { span { "· out at {work::clock(track.segments[step.out].start)}" } }
+                                        }
+                                        div { class: "tl-artist", "{artist}" }
+                                    }
+                                    span { class: "tl-tempo num",
+                                        "{track.bpm().unwrap_or(0.0):.1}"
+                                        if let Some(by) = stretch {
+                                            span { class: "muted", " {by:+.1}%" }
                                         }
                                     }
-                                    div { class: "actions",
-                                        span { class: "on-hover row-flex",
-                                            button { class: "icon-btn", title: "move it earlier", disabled: k == 0,
-                                                onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Up(k))) }, {icons::up()} }
-                                            button { class: "icon-btn", title: "move it later", disabled: last,
-                                                onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Down(k))) }, {icons::down()} }
-                                            button { class: "ghost", title: "put another track in this slot",
-                                                onclick: move |_| picking.set(match picking() {
-                                                    Some(Pick { at: a, swapping: true }) if a == k => None,
-                                                    _ => Some(Pick { at: k, swapping: true }),
-                                                }),
-                                                "Swap"
-                                            }
-                                            button { class: "ghost", title: "keep the set to here and plan the rest again", disabled: last,
-                                                onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Replan(k))) }, "Re-plan" }
-                                            button { class: "icon-btn", title: "take it out of the set",
-                                                onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Remove(k))) }, {icons::remove()} }
+                                    span { class: "tl-key num",
+                                        {track.analysis.key.as_ref().map_or("–".to_string(), |key| key.camelot.clone())}
+                                    }
+                                    span { class: "tl-plays num", "{work::clock(played(track, step))}" }
+                                    div { class: "tl-act on-hover",
+                                        button { class: "ghost", title: "move it earlier", disabled: k == 0,
+                                            onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Up(k))) }, {icons::up()} }
+                                        button { class: "ghost", title: "move it later", disabled: last,
+                                            onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Down(k))) }, {icons::down()} }
+                                        button { class: "ghost",
+                                            onclick: move |_| picking.set(match picking() {
+                                                Some(Pick { at: a, swapping: true }) if a == k => None,
+                                                _ => Some(Pick { at: k, swapping: true }),
+                                            }),
+                                            if picking() == Some(Pick { at: k, swapping: true }) { "Close alternatives" } else { "Swap" }
                                         }
-                                        if let Some(at) = clip().and_then(|c| c.marks.get(k).map(|m| m.at)) {
-                                            button {
-                                                class: "ghost",
-                                                title: "play the render from where this track comes in",
-                                                onclick: {
-                                                    let url = clip().map(|c| crate::server::url(&c.path));
-                                                    move |_| if let Some(url) = &url { super::player::play(url, at) }
-                                                },
-                                                "▶ {work::clock(at)}"
-                                            }
-                                        }
-                                        if let Some(step) = step {
-                                            span { class: "{score_class(step.score)}", "{step.score:.2}" }
-                                        } else {
-                                            span { class: "muted small", "end" }
+                                        button { class: "ghost", title: "take it out", 
+                                            onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Remove(k))) }, "Remove" }
+                                        button { class: "ghost", disabled: last,
+                                            title: "keep the set to here and plan the rest again",
+                                            onclick: { let l = library.clone(); move |_| edit((l.clone(), Edit::Replan(k))) },
+                                            "Keep to here, re-plan rest"
                                         }
                                     }
                                 }
                                 if picking() == Some(Pick { at: k, swapping: true }) {
-                                    Picker { at: k, swapping: true, open, picking, library: library.clone(), edit }
+                                    div { class: "tl-panel",
+                                        div { class: "muted small", "Instead of " b { "{title}" } ", ranked by both of its transitions" }
+                                        Picker { at: k, swapping: true, open, picking, library: library.clone(), edit }
+                                    }
                                 }
-                                GapLine { at: k + 1, total: resolved.plan.tracks.len(), picking, open, library: library.clone(), edit }
+                                // The mix itself: where it happens and how good it is.
+                                if let Some(step) = step {
+                                    {
+                                        let next = &library.0.tracks[resolved.plan.tracks[k + 1]];
+                                        let (out, into) = (track.segments[step.out].start, next.segments[step.into].start);
+                                        let keys = match (track.analysis.key.as_ref(), next.analysis.key.as_ref()) {
+                                            (Some(a), Some(b)) => format!("{} → {}", a.camelot, b.camelot),
+                                            _ => "–".into(),
+                                        };
+                                        let steps = step.key_steps.map(|n| format!(" · {n}")).unwrap_or_default();
+                                        let energy = step.energy.map(|lu| format!(" · {lu:+.1} LU")).unwrap_or_default();
+                                        let pct = (step.ratio - 1.0) * 100.0;
+                                        rsx! {
+                                            div { class: "tl-mix",
+                                                span { class: "tl-n" }
+                                                span { class: "mix-score {score_class(step.score)}", "{step.score:.2}" }
+                                                span { class: "mix-of",
+                                                    "out at {work::clock(out)} → in at {work::clock(into)} · {pct:+.1}% tempo · {keys}{steps} · sound {step.sound:.2}{energy}"
+                                                }
+                                                div { class: "mix-act",
+                                                    button { class: "ghost insert on-hover",
+                                                        onclick: move |_| picking.set(match picking() {
+                                                            Some(Pick { at: a, swapping: false }) if a == k + 1 => None,
+                                                            _ => Some(Pick { at: k + 1, swapping: false }),
+                                                        }),
+                                                        "+ insert between"
+                                                    }
+                                                    if let Some(at) = clip().and_then(|c| c.marks.get(k).map(|m| m.at)) {
+                                                        button { class: "ghost",
+                                                            onclick: {
+                                                                let url = clip().map(|c| crate::server::url(&c.path));
+                                                                move |_| if let Some(url) = &url { super::player::play(url, (at - 8.0).max(0.0)) }
+                                                            },
+                                                            {icons::play()}
+                                                            "hear"
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            if picking() == Some(Pick { at: k + 1, swapping: false }) {
+                                                div { class: "tl-panel",
+                                                    Picker { at: k + 1, swapping: false, open, picking, library: library.clone(), edit }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -671,7 +729,7 @@ fn Picker(
     let mut picking = picking;
     let mut words = use_signal(String::new);
     let mut found: Signal<Vec<(String, String, Option<f64>)>> = use_signal(Vec::new);
-    let mut fits: Signal<Vec<(String, f64)>> = use_signal(Vec::new);
+    let mut fits: Signal<Vec<stelly_mix::sets::Fit>> = use_signal(Vec::new);
 
     let starting = library.clone();
     use_hook(move || {
@@ -751,17 +809,32 @@ fn Picker(
                             }
                         }
                     }
+                } else if fits.read().is_empty() {
+                    span { class: "muted small", "looking for what fits here…" }
                 } else {
-                    span { class: "muted small",
-                        if fits.read().is_empty() { "looking for what fits here…" } else { "what fits here:" }
+                    // Both sides, because a swap changes two mixes and which
+                    // of them it spoils is the thing worth seeing.
+                    div { class: "pick-head",
+                        span { class: "spacer" }
+                        span { "in" }
+                        span { "out" }
+                        span { "mean" }
                     }
-                    for (key, score) in fits() {
+                    for fit in fits() {
                         button { class: "pick", onclick: {
-                                let (library, key) = (library.clone(), key.clone());
+                                let (library, key) = (library.clone(), fit.key.clone());
                                 move |_| chosen((library.clone(), key.clone()))
                             },
-                            span { class: "ellipsis", "{name_of(&key)}" }
-                            span { class: "{score_class(score)}", "{score:.2}" }
+                            span { class: "ellipsis", "{name_of(&fit.key)}" }
+                            match fit.coming_in {
+                                Some(score) => rsx! { span { class: "{score_class(score)}", "{score:.2}" } },
+                                None => rsx! { span { class: "muted", "–" } },
+                            }
+                            match fit.going_out {
+                                Some(score) => rsx! { span { class: "{score_class(score)}", "{score:.2}" } },
+                                None => rsx! { span { class: "muted", "–" } },
+                            }
+                            span { class: "{score_class(fit.mean)} mean", "{fit.mean:.2}" }
                         }
                     }
                 }
@@ -940,5 +1013,14 @@ fn Exporter(set: Set, library: Lib, unsaved: bool) -> Element {
                 p { class: "told", "Written to {where_to}" }
             }
         }
+    }
+}
+
+/// How long a track is actually heard for: from where it came in to where
+/// it goes out, which is not its length.
+fn played(track: &stelly_mix::library::Track, step: Option<&stelly_mix::transitions::Transition>) -> f64 {
+    match step {
+        Some(step) => track.segments.get(step.out).map_or(track.analysis.seconds, |s| s.start),
+        None => track.analysis.seconds,
     }
 }

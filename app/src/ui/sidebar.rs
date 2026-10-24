@@ -57,7 +57,7 @@ pub fn Sidebar() -> Element {
                         Some(set) if !set.tracks.is_empty() => {
                             work::fits_between(&lib.0, set, gap.min(set.tracks.len()), SHOWN)
                                 .into_iter()
-                                .map(|(key, score)| (key, Some(score)))
+                                .map(|fit| (fit.key, Some(fit.mean)))
                                 .collect()
                         }
                         _ => Vec::new(),
