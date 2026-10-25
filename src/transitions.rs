@@ -26,6 +26,11 @@ const KEY: f64 = 0.2;
 const ENERGY: f64 = 0.1;
 /// Below this a key estimate is a guess, and scores as neither good nor bad.
 const KEY_STRENGTH: f64 = 0.5;
+/// An eight-bar phrase's own key counts from here: over a library, phrases
+/// this sure agree with their track's key twice as often as they differ,
+/// and the rest are as much a parallel major or minor mistaken as a real
+/// change. So it is half the key score, never all of it.
+const PHRASE_KEY_STRENGTH: f64 = 0.75;
 /// A loudness step this large in either direction scores nothing, LU.
 const ENERGY_RANGE: f64 = 6.0;
 /// Two people singing at once, over the phrase the mix happens on. The ear
@@ -234,7 +239,7 @@ pub fn from_allowed(
 
     // Each track's best pair of phrases first, by how alike they sound and
     // how evenly the energy carries over.
-    let candidate = |(to, next): (usize, &Track)| -> Option<(Transition, f64, f64)> {
+    let candidate = |(to, next): (usize, &Track)| -> Option<Transition> {
         if next.path == playing.path || !allowed(to, next) || same_recording(playing, next) {
             return None;
         }
@@ -248,15 +253,12 @@ pub fn from_allowed(
                 (Some(a), Some(b)) if a.strength >= KEY_STRENGTH && b.strength >= KEY_STRENGTH => a.distance(b),
                 _ => None,
             };
-            let key_score = match key_steps {
-                Some(0) => 1.0,
-                Some(1) => 0.8,
-                Some(2) => 0.4,
-                Some(_) => 0.0,
-                None => 0.5,
-            };
-            let fixed = TEMPO * (1.0 - stretch / options.max_stretch) + KEY * key_score;
+            let track_key = key_score(key_steps);
+            let tempo = TEMPO * (1.0 - stretch / options.max_stretch);
 
+            // Every pair of phrases scored whole, and the best kept: a pair
+            // that sounds a touch less alike but keeps two voices apart, or
+            // whose phrases share a key, is the better mix.
             let ins = entries(next);
             outs.iter()
                 .flat_map(|&out| ins.iter().map(move |&into| (out, into)))
@@ -265,24 +267,29 @@ pub fn from_allowed(
                     let sound = cosine(&a.embedding, &b.embedding);
                     let energy = a.loudness.zip(b.loudness).map(|(a, b)| b - a);
                     let energy_score = energy.map_or(0.5, |e| 1.0 - (e.abs() / ENERGY_RANGE).min(1.0));
-                    let transition = Transition {
-                        to,
-                        out,
-                        into,
-                        score: 0.0,
-                        sound,
-                        ratio,
-                        key_steps,
-                        energy,
+                    let phrase_key = match (&a.key, &b.key) {
+                        (Some(x), Some(y)) if x.strength >= PHRASE_KEY_STRENGTH && y.strength >= PHRASE_KEY_STRENGTH => {
+                            Some(key_score(x.distance(y)))
+                        }
+                        _ => None,
                     };
-                    (transition, fixed, energy_score)
+                    let key = phrase_key.map_or(track_key, |p| (track_key + p) / 2.0);
+                    // Voices: a track nobody has listened to scores as it
+                    // always did, so the ranking only changes where something
+                    // is known.
+                    let out_voice = playing.vocals.as_ref().map_or(0.0, |heard| heard.how_much(out));
+                    let into_voice = next.vocals.as_ref().map_or(0.0, |heard| heard.how_much(into));
+                    let score = SOUND * options.sound.score(sound) + tempo + KEY * key + ENERGY * energy_score
+                        - CLASH * out_voice * into_voice
+                        - INTERRUPTS * out_voice.max(into_voice);
+                    Transition { to, out, into, score, sound, ratio, key_steps, energy }
                 })
-                .max_by(|a, b| (a.0.sound + 0.01 * a.2).total_cmp(&(b.0.sound + 0.01 * b.2)))
+                .max_by(|a, b| a.score.total_cmp(&b.score))
         }
     };
     // Over every core for a large library, in order either way.
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
-    let mut best: Vec<(Transition, f64, f64)> = if others.len() < 2000 || threads < 2 {
+    let mut best: Vec<Transition> = if others.len() < 2000 || threads < 2 {
         others.iter().enumerate().filter_map(candidate).collect()
     } else {
         let chunk = others.len().div_ceil(threads);
@@ -299,27 +306,21 @@ pub fn from_allowed(
         })
     };
 
-    // Then sound scored against the library's best pairs: within a genre
-    // every pair is 0.93–0.96, so the raw cosine would hardly count.
-    //
-    // Voices come off the end: a track nobody has listened to scores as it
-    // always did, so the ranking only changes where something is known.
-    for (transition, fixed, energy_score) in &mut best {
-        let out_voice = playing.vocals.as_ref().map_or(0.0, |heard| heard.how_much(transition.out));
-        let into_voice = others
-            .get(transition.to)
-            .and_then(|next| next.vocals.as_ref())
-            .map_or(0.0, |heard| heard.how_much(transition.into));
-        let clash = out_voice * into_voice;
-        let interrupts = out_voice.max(into_voice);
-        transition.score = SOUND * options.sound.score(transition.sound) + *fixed + ENERGY * *energy_score
-            - CLASH * clash
-            - INTERRUPTS * interrupts;
-    }
-    let mut best: Vec<Transition> = best.into_iter().map(|b| b.0).collect();
     best.sort_by(|a, b| b.score.total_cmp(&a.score));
     // One way into each recording: the best of its copies.
     one_per_recording(best, others)
+}
+
+/// Steps round the Camelot wheel as a score: the same key or a neighbour is
+/// a safe mix, two steps an audible one, further a clash. Unknown is neither.
+fn key_score(steps: Option<u32>) -> f64 {
+    match steps {
+        Some(0) => 1.0,
+        Some(1) => 0.8,
+        Some(2) => 0.4,
+        Some(_) => 0.0,
+        None => 0.5,
+    }
 }
 
 /// The segments a track can be mixed into: those in its first half that
@@ -448,6 +449,43 @@ pub(crate) mod tests {
         let phrases = vec![crate::vocals::SPEAKS + 0.3; track.segments.len()];
         track.vocals = Some(crate::vocals::Heard { version: crate::vocals::VERSION, track: phrases[0], phrases });
         track
+    }
+
+    /// A voice in the given phrases only.
+    fn singing_in(mut track: Track, phrases: &[usize]) -> Track {
+        let scores: Vec<f64> = (0..track.segments.len())
+            .map(|i| if phrases.contains(&i) { crate::vocals::SPEAKS + 0.3 } else { crate::vocals::SPEAKS - 0.3 })
+            .collect();
+        track.vocals = Some(crate::vocals::Heard { version: crate::vocals::VERSION, track: 0.0, phrases: scores });
+        track
+    }
+
+    #[test]
+    fn a_pair_that_keeps_two_voices_apart_beats_a_closer_sounding_clash() {
+        let options = Options { sound: SoundScale { mean: 0.99, spread: 0.01 }, ..Default::default() };
+        // Mixed out of in its second half, phrases 4 and 5 here. Out of 4
+        // into 0 sounds the same but both sing there; out of 5 into 1 sounds
+        // a hair less alike, and nobody does.
+        let playing = singing_in(track("a", &[0, 1, 2, 3, 7, 8], false), &[4]);
+        let mut next = singing_in(track("b", &[7, 8, 9, 4, 5, 6], false), &[0]);
+        next.segments[1].embedding[8] = 0.9;
+        let best = from(&playing, std::slice::from_ref(&next), &options);
+        let chosen = best.first().expect("a way across");
+        assert_eq!((chosen.out, chosen.into), (5, 1), "{chosen:?}");
+    }
+
+    #[test]
+    fn phrases_in_one_key_beat_a_pair_that_only_sounds_as_alike() {
+        let key = |tonic: &str, scale: &str| crate::key::Key::new(tonic, scale, 0.9);
+        let mut playing = track("a", &[0, 1, 2, 3, 7, 7], false);
+        let mut next = track("b", &[7, 4, 5, 6, 8, 9], false);
+        // Out of 4 and out of 5 sound the same into 0; only 4 shares its key.
+        playing.segments[4].key = key("A", "minor");
+        playing.segments[5].key = key("D#", "major");
+        next.segments[0].key = key("A", "minor");
+        let best = from(&playing, std::slice::from_ref(&next), &Options::default());
+        let chosen = best.first().expect("a way across");
+        assert_eq!((chosen.out, chosen.into), (4, 0), "{chosen:?}");
     }
 
     #[test]
