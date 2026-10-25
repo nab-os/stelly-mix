@@ -161,6 +161,43 @@ pub fn same_recording(a: &Track, b: &Track) -> bool {
     (!a.name.is_empty() && a.name == b.name) || dot(&a.sound, &b.sound) > 0.98
 }
 
+/// Whether two entries are one song, whatever the edit: an album version and
+/// its radio edit, a remaster, a live take, a remix. Two of them in one set
+/// is the same song twice, which `same_recording`, held to one length,
+/// lets through. The artist and title as the source gave them, else the file
+/// name; either way with whatever is in brackets set aside, where catalogues
+/// put the edit, the version and their own ids.
+pub fn same_song(a: &Track, b: &Track) -> bool {
+    let (a, b) = (song(a), song(b));
+    !a.is_empty() && a == b
+}
+
+fn song(track: &Track) -> String {
+    let name = match &track.origin {
+        Some(origin) => format!("{} {}", origin.item.artist, origin.item.title),
+        None => track.name(),
+    };
+    let mut depth = 0usize;
+    let bare: String = name
+        .chars()
+        .filter(|c| match c {
+            '(' | '[' => {
+                depth += 1;
+                false
+            }
+            ')' | ']' => {
+                depth = depth.saturating_sub(1);
+                false
+            }
+            _ => depth == 0,
+        })
+        .flat_map(char::to_lowercase)
+        .filter(|c| c.is_alphanumeric())
+        .collect();
+    // A leading track number is the file's, not the song's.
+    bare.trim_start_matches(|c: char| c.is_ascii_digit()).to_string()
+}
+
 /// How far apart two copies of a recording's lengths can be, seconds.
 const SAME_LENGTH: f64 = 2.0;
 
@@ -486,6 +523,17 @@ pub(crate) mod tests {
         let best = from(&playing, std::slice::from_ref(&next), &Options::default());
         let chosen = best.first().expect("a way across");
         assert_eq!((chosen.out, chosen.into), (4, 0), "{chosen:?}");
+    }
+
+    #[test]
+    fn one_song_is_one_song_whatever_the_edit() {
+        let named = |name: &str| track(name, &[0, 1], false);
+        let album = named("Jamiroquai - Rock Dust Light Star [2629679]");
+        assert!(same_song(&album, &named("Jamiroquai - Rock Dust Light Star (Radio Edit) [2629664]")));
+        assert!(same_song(&album, &named("07 Jamiroquai - Rock Dust Light Star")));
+        assert!(same_song(&album, &named("jamiroquai - rock dust, light star (2010 Remaster)")));
+        assert!(!same_song(&album, &named("Jamiroquai - Blue Skies [2629680]")));
+        assert!(!same_song(&named("[1]"), &named("(2)")), "nothing left of a name is no song");
     }
 
     #[test]

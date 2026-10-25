@@ -9,7 +9,7 @@
 //! the best average transition wins.
 
 use crate::library::Track;
-use crate::transitions::{self, fold, same_recording, Transition};
+use crate::transitions::{self, fold, same_recording, same_song, Transition};
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -111,7 +111,8 @@ pub fn plan(library: &[Track], first: usize, options: &Options) -> Option<Plan> 
             let entered = plan.transitions.last().map_or(0.0, |t| playing.segments[t.into].start);
             let liked = |i: usize| options.like.as_ref().map_or(1.0, |like| like[i]);
             let steps = transitions::from_allowed(playing, library, &ranking, |i, next| {
-                let played = plan.tracks.iter().chain(&options.avoid).any(|&p| p == i || same_recording(&library[p], next));
+                // Nor another edit of a song already in it.
+                let played = plan.tracks.iter().chain(&options.avoid).any(|&p| p == i || same_recording(&library[p], next) || same_song(&library[p], next));
                 !played && liked(i) >= LIKE_FLOOR
             });
             let mut extended = false;
@@ -152,4 +153,28 @@ pub fn plan(library: &[Track], first: usize, options: &Options) -> Option<Plan> 
                 a.seconds.total_cmp(&b.seconds)
             }
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transitions::tests::track;
+
+    #[test]
+    fn a_set_never_plays_two_edits_of_one_song() {
+        // Named as local files are, by their file; all of them mix with all.
+        // The test tracks all sound alike, so only their lengths, which
+        // their names set, keep them from passing for copies of one
+        // recording: these are each 3s or more from the rest.
+        let phrases = [0, 1, 2, 3, 4, 5, 6, 7];
+        let library = vec![
+            track("Artist - Outro", &phrases, false),
+            track("Artist - Song [101]", &phrases, false),
+            track("Artist - Song (Radio Edit) [102]", &phrases, false),
+            track("Artist - Closer", &phrases, false),
+        ];
+        let plan = plan(&library, 0, &Options { seconds: 6.0 * 60.0 * 60.0, min_play: 10.0, ..Default::default() }).expect("a set");
+        assert!(plan.tracks.len() >= 3, "the set still runs through what it can: {:?}", plan.tracks);
+        assert!(!(plan.tracks.contains(&1) && plan.tracks.contains(&2)), "the song twice: {:?}", plan.tracks);
+    }
 }
