@@ -607,7 +607,9 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
                                                         }),
                                                         "+ insert between"
                                                     }
-                                                    if let Some(at) = clip().and_then(|c| c.marks.get(k).map(|m| m.at)) {
+                                                    // A set's marks are where each track comes in, so
+                                                    // this row's mix, into k + 1, is that track's mark.
+                                                    if let Some(at) = clip().and_then(|c| c.marks.get(k + 1).map(|m| m.at)) {
                                                         button { class: "ghost",
                                                             onclick: {
                                                                 let url = clip().map(|c| crate::server::url(&c.path));
