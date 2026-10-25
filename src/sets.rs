@@ -339,6 +339,7 @@ impl Set {
         let held: Vec<usize> = self.resolved(library).into_iter().flatten().collect();
         let free = |i: usize| {
             !held.contains(&i)
+                && crate::set::steady(&library[i])
                 && !held.iter().filter(|&&h| Some(h) != replacing).any(|&h| crate::transitions::same_song(&library[h], &library[i]))
         };
 

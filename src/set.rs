@@ -113,7 +113,7 @@ pub fn plan(library: &[Track], first: usize, options: &Options) -> Option<Plan> 
             let steps = transitions::from_allowed(playing, library, &ranking, |i, next| {
                 // Nor another edit of a song already in it.
                 let played = plan.tracks.iter().chain(&options.avoid).any(|&p| p == i || same_recording(&library[p], next) || same_song(&library[p], next));
-                !played && liked(i) >= LIKE_FLOOR
+                !played && steady(next) && liked(i) >= LIKE_FLOOR
             });
             let mut extended = false;
             let long_enough = |step: &Transition| (playing.segments[step.out].start - entered) * rate(playing) >= options.min_play;
@@ -155,10 +155,28 @@ pub fn plan(library: &[Track], first: usize, options: &Options) -> Option<Plan> 
         })
 }
 
+/// Whether a track keeps one tempo, so a set can play it at one rate and
+/// stay on the beat. One that drifts, a live drummer, a rubato, drifts off
+/// the beat of whatever it is mixed with: a set leaves it out, as it already
+/// would not start on one.
+pub fn steady(track: &Track) -> bool {
+    track.analysis.grid.as_ref().is_some_and(|g| g.steady)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::transitions::tests::track;
+
+    #[test]
+    fn a_set_leaves_out_a_track_whose_tempo_drifts() {
+        let phrases = [0, 1, 2, 3, 4, 5, 6, 7];
+        let mut drifting = track("Artist - Song [101]", &phrases, false);
+        drifting.analysis.grid.as_mut().unwrap().steady = false;
+        let library = vec![track("Artist - Outro", &phrases, false), drifting, track("Artist - Closer", &phrases, false)];
+        let plan = plan(&library, 0, &Options { seconds: 6.0 * 60.0 * 60.0, min_play: 10.0, ..Default::default() }).expect("a set");
+        assert_eq!(plan.tracks, vec![0, 2], "the steady ones, and not the one that drifts");
+    }
 
     #[test]
     fn a_set_never_plays_two_edits_of_one_song() {

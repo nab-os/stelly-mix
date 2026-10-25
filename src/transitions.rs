@@ -40,6 +40,13 @@ const CLASH: f64 = 0.25;
 /// A voice on one side of a mix is how a great many of them are made, so
 /// mixing away from a singer mid-phrase is worth only a little against it.
 const INTERRUPTS: f64 = 0.08;
+/// How far under a library's usual best pairs a pair's sound may be before
+/// it is no mix at all, in spreads of `SoundScale`. Tempo, key and energy
+/// alone score well over a third, which carried a film score into metal in
+/// three steps. Over a real library the best pairs fall in two: alike, 0.9
+/// and over, and unrelated, 0.7 and under, a tenth of them; anywhere from
+/// two spreads to six under the mean parts the two the same, so four.
+const SOUND_FLOOR_SPREADS: f64 = 4.0;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -146,6 +153,12 @@ impl SoundScale {
     /// 0..1: two spreads under the mean is a 0, two over a 1.
     pub fn score(&self, sound: f64) -> f64 {
         (((sound - self.mean) / self.spread + 2.0) / 4.0).clamp(0.0, 1.0)
+    }
+
+    /// The least sound a pair may have and still be a mix; see
+    /// `SOUND_FLOOR_SPREADS`.
+    pub fn floor(&self) -> f64 {
+        self.mean - SOUND_FLOOR_SPREADS * self.spread
     }
 }
 
@@ -273,6 +286,7 @@ pub fn from_allowed(
         return Vec::new();
     };
     let outs = half(playing, false);
+    let floor = options.sound.floor();
 
     // Each track's best pair of phrases first, by how alike they sound and
     // how evenly the energy carries over.
@@ -321,6 +335,9 @@ pub fn from_allowed(
                         - INTERRUPTS * out_voice.max(into_voice);
                     Transition { to, out, into, score, sound, ratio, key_steps, energy }
                 })
+                // A pair that sounds nothing alike is no mix, however well
+                // its tempo and key would carry it.
+                .filter(|t| t.sound >= floor)
                 .max_by(|a, b| a.score.total_cmp(&b.score))
         }
     };
@@ -534,6 +551,21 @@ pub(crate) mod tests {
         assert!(same_song(&album, &named("jamiroquai - rock dust, light star (2010 Remaster)")));
         assert!(!same_song(&album, &named("Jamiroquai - Blue Skies [2629680]")));
         assert!(!same_song(&named("[1]"), &named("(2)")), "nothing left of a name is no song");
+    }
+
+    #[test]
+    fn a_track_that_sounds_nothing_alike_is_no_mix() {
+        let options = Options { sound: SoundScale { mean: 0.9, spread: 0.05 }, ..Default::default() };
+        let playing = track("a", &[0, 1, 2, 3, 4, 5], false);
+        let alike = track("b", &[0, 1, 2, 3, 4, 5], false);
+        // Same tempo, same everything, but nothing in common to hear.
+        let mut unrelated = track("c", &[0, 1, 2, 3, 4, 5], false);
+        for segment in &mut unrelated.segments {
+            segment.embedding = vec![0.0; 512];
+            segment.embedding[500] = 1.0;
+        }
+        let offered: Vec<usize> = from(&playing, &[alike, unrelated], &options).iter().map(|t| t.to).collect();
+        assert_eq!(offered, vec![0], "only the one that sounds alike");
     }
 
     #[test]
