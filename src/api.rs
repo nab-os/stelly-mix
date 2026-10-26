@@ -19,6 +19,10 @@ pub struct TrackSummary {
     pub key: Option<String>,
     pub seconds: f64,
     pub phrases: usize,
+    /// `drops::VERSION` its drops were found by; absent when it has none,
+    /// and from a server from before them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drops: Option<u32>,
 }
 
 impl TrackSummary {
@@ -36,6 +40,7 @@ impl TrackSummary {
             key: track.analysis.key.as_ref().map(|k| k.camelot.clone()),
             seconds: track.analysis.seconds,
             phrases: track.analysis.phrases.len(),
+            drops: track.analysis.drops.as_ref().map(|d| d.version),
         }
     }
 
@@ -66,6 +71,11 @@ pub struct Way {
     /// The segment mixed into, in the next track, and its seconds.
     pub into: usize,
     pub into_at: (f64, f64),
+    /// See `Transition`. Absent from a server from before drops.
+    #[serde(default)]
+    pub drop_lands: Option<f64>,
+    #[serde(default)]
+    pub cuts_drop: bool,
 }
 
 impl Way {
@@ -83,6 +93,8 @@ impl Way {
             out_at: (out.start, out.end),
             into: transition.into,
             into_at: (into.start, into.end),
+            drop_lands: transition.drop_lands,
+            cuts_drop: transition.cuts_drop,
         }
     }
 
@@ -97,6 +109,8 @@ impl Way {
             ratio: self.ratio,
             key_steps: self.key_steps,
             energy: self.energy,
+            drop_lands: self.drop_lands,
+            cuts_drop: self.cuts_drop,
         }
     }
 }

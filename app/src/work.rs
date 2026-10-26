@@ -113,6 +113,26 @@ fn peaks_of(samples: &[f32], buckets: usize) -> Vec<f32> {
     peaks.into_iter().map(|p| p / top).collect()
 }
 
+/// The drops of a track analysed before they were looked for, or by an
+/// older build, from its audio at `file`, kept in its library entry for the
+/// next time.
+pub fn drops(track: &Track, file: &Path) -> Result<Vec<f64>> {
+    let pcm = stelly_mix::decode::decode_file(file)?;
+    let drops = stelly_mix::drops::of(&pcm, &track.analysis);
+    // Into the entry as it is on disk now, not as it was loaded: something
+    // else, listening for voices say, may have written it since.
+    let library = library()?;
+    let stored = match &track.origin {
+        Some(origin) => library.by_origin(&origin.key()),
+        None => library.get(&track.path),
+    };
+    if let Some(mut stored) = stored {
+        stored.analysis.drops = Some(drops.clone());
+        library.put(&stored)?;
+    }
+    Ok(drops.at)
+}
+
 /// A track's audio, fetched again from its source if its file has gone.
 pub fn audio(track: &Track) -> Result<PathBuf> {
     sources().audio(track)
@@ -514,7 +534,7 @@ mod tests {
 
     #[test]
     fn a_set_re_cut_is_rendered_to_a_file_of_its_own() {
-        let mix = |out, into| Transition { to: 1, out, into, score: 0.5, sound: 0.5, ratio: 1.0, key_steps: None, energy: None };
+        let mix = |out, into| Transition { to: 1, out, into, score: 0.5, sound: 0.5, ratio: 1.0, key_steps: None, energy: None, drop_lands: None, cuts_drop: false };
         let paths = [Path::new("/a.mp3"), Path::new("/b.mp3")];
         let settings = Settings::default();
         let name = set_file_name(&paths, &[mix(4, 1)], &settings);

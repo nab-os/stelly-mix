@@ -19,6 +19,14 @@ Library/ALT BLK ERA/Misfits _ SOLAR/02 - I'm Normally Like This.flac
   2:54.1 long, analysed in 0.4s
 ```
 
+Drops are where the low end, 30 to 145Hz, comes back after a breakdown or
+a build: the four bars before a bar line at least 3 dB under the track's
+median bar, the four from it back within 3 dB of it, and 6 dB of climb
+between them. Not in the first phrase, where it is the drums coming in
+after a short intro. Nothing knows about genre: in a band's song it is the
+band back in after a quiet part. An entry analysed before drops were
+looked for gets them the first time the app shows it.
+
 ## Mixing
 
 ```sh

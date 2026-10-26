@@ -591,13 +591,14 @@ fn Editor(open: Signal<Option<Editing>>, on_kept: EventHandler<()>) -> Element {
                                         };
                                         let steps = step.key_steps.map(|n| format!(" · {n}")).unwrap_or_default();
                                         let energy = step.energy.map(|lu| format!(" · {lu:+.1} LU")).unwrap_or_default();
+                                        let drops = stelly_mix::transitions::drops_note(step.drop_lands, step.cuts_drop).map(|n| format!(" · {n}")).unwrap_or_default();
                                         let pct = (step.ratio - 1.0) * 100.0;
                                         rsx! {
                                             div { class: "tl-mix",
                                                 span { class: "tl-n" }
                                                 span { class: "mix-score {score_class(step.score)}", "{step.score:.2}" }
                                                 span { class: "mix-of",
-                                                    "out at {work::clock(out)} → in at {work::clock(into)} · {pct:+.1}% tempo · {keys}{steps} · sound {step.sound:.2}{energy}"
+                                                    "out at {work::clock(out)} → in at {work::clock(into)} · {pct:+.1}% tempo · {keys}{steps} · sound {step.sound:.2}{energy}{drops}"
                                                 }
                                                 div { class: "mix-act",
                                                     button { class: "ghost insert on-hover",

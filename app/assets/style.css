@@ -401,6 +401,7 @@ button:not(.primary):not(.secondary):not(.ghost):not(.danger):not(.chip):not(.ic
 .wave .downbeat { stroke: #ffffff12; stroke-width: 1; }
 .wave .phrase { stroke: #7aa2f766; stroke-width: 1; }
 .wave .section { stroke: var(--warm); stroke-width: 1.5; }
+.wave .drop { stroke: var(--danger); stroke-width: 2.5; }
 .wave .span { fill: #7aa2f747; }
 .wave .span.into { fill: #9ece6a3d; }
 .wave .mark { stroke: var(--good); stroke-width: 1.5; }
