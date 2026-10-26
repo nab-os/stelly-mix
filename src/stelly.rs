@@ -25,6 +25,8 @@ use stelly_provider::Quality;
 
 /// Entries asked for at once while syncing.
 const CHUNK: usize = 200;
+/// The largest reply read, bytes: a chunk of entries, at worst.
+const REPLY_LIMIT: u64 = 1 << 30;
 /// What Stelly's tracks are called here: `stelly:<id>`, by the server's own
 /// ids, whichever of its providers has the audio.
 pub const SOURCE: &str = "stelly";
@@ -308,7 +310,14 @@ impl Stelly {
 /// A reply's JSON, or why there is none.
 fn answer<T: DeserializeOwned>(path: &str, mut response: ureq::http::Response<ureq::Body>) -> Result<T> {
     let status = response.status();
-    let body = response.body_mut().read_to_string().unwrap_or_default();
+    // Past ureq's own 10MB: two hundred long tracks' entries come to more.
+    let read = response.body_mut().with_config().limit(REPLY_LIMIT).read_to_string();
+    let body = match read {
+        Ok(body) => body,
+        Err(err) if status.is_success() => return Err(err).with_context(|| format!("reading {path}")),
+        // A failure's own text is only a nicety.
+        Err(_) => String::new(),
+    };
     if status.as_u16() == 401 {
         bail!("Stelly's server refused the token in STELLY_TOKEN");
     }
