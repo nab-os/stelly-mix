@@ -407,9 +407,14 @@ fn transpose(left: &[f32], right: &[f32], rate: u32, factor: f64) -> (Vec<f32>, 
     output.chunks_exact(2).map(|lr| (lr[0], lr[1])).unzip()
 }
 
-/// Linkwitz-Riley low-pass at `CROSSOVER_HZ`: two Butterworth sections. The
-/// rest is the signal minus this, so the two bands always add back up to
-/// exactly the signal.
+/// Low-pass at `CROSSOVER_HZ` with a Linkwitz-Riley's slope and no phase
+/// shift: one Butterworth section run forward, then back over the result.
+/// The rest is the signal minus this, so the two bands add back up to exactly
+/// the signal, and with no phase shift the rest really is without the bass.
+///
+/// Two sections both run forward, a Linkwitz-Riley proper, shift the bass by
+/// half a turn around the crossover: the signal minus that keeps most of it,
+/// 75 Hz louder than it came in, and the bass held back still came in.
 fn lowpass(input: &[f32], rate: u32) -> Vec<f32> {
     let w = 2.0 * PI * CROSSOVER_HZ / rate as f64;
     let alpha = w.sin() / (2.0 * (1.0 / SQRT_2));
@@ -426,8 +431,11 @@ fn lowpass(input: &[f32], rate: u32) -> Vec<f32> {
             })
             .collect()
     };
-    let once = section(&input.iter().map(|&v| v as f64).collect::<Vec<_>>());
-    section(&once).into_iter().map(|v| v as f32).collect()
+    let mut once = section(&input.iter().map(|&v| v as f64).collect::<Vec<_>>());
+    once.reverse();
+    let mut back = section(&once);
+    back.reverse();
+    back.into_iter().map(|v| v as f32).collect()
 }
 
 /// 16-bit stereo WAV, written as it goes rather than built in memory first.
@@ -502,15 +510,22 @@ mod tests {
 
     #[test]
     fn the_low_band_holds_the_bass_and_not_the_rest() {
-        // RMS after the filter has settled, over RMS before.
-        let kept = |hz: f64| {
+        // RMS of (low band, the rest) over the tone's, away from the ends,
+        // where a filter run both ways settles.
+        let bands = |hz: f64| {
             let tone = sine(hz, 1.0);
             let low = lowpass(&tone, RATE);
-            let rms = |v: &[f32]| (v[RATE as usize / 2..].iter().map(|x| x * x).sum::<f32>()).sqrt();
-            rms(&low) / rms(&tone)
+            let rest: Vec<f32> = tone.iter().zip(&low).map(|(x, l)| x - l).collect();
+            let rms = |v: &[f32]| (v[RATE as usize / 4..3 * RATE as usize / 4].iter().map(|x| x * x).sum::<f32>()).sqrt();
+            (rms(&low) / rms(&tone), rms(&rest) / rms(&tone))
         };
-        assert!(kept(50.0) > 0.9, "50Hz: {}", kept(50.0));
-        assert!(kept(1000.0) < 0.01, "1kHz: {}", kept(1000.0));
+        assert!(bands(50.0).0 > 0.95, "50Hz in the low band: {:?}", bands(50.0));
+        assert!(bands(1000.0).0 < 0.01, "1kHz in the low band: {:?}", bands(1000.0));
+        assert!(bands(1000.0).1 > 0.99, "1kHz in the rest: {:?}", bands(1000.0));
+        // The rest is what the incoming track plays while its bass is held
+        // back: a kick's or a bassline's fundamental must not be in it.
+        assert!(bands(50.0).1 < 0.05, "50Hz in the rest: {:?}", bands(50.0));
+        assert!(bands(75.0).1 < 0.1, "75Hz in the rest: {:?}", bands(75.0));
     }
 
     #[test]

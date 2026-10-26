@@ -160,6 +160,15 @@ fn file_name(parts: &[&str]) -> String {
     format!("{hash:016x}.wav")
 }
 
+/// A set's render is its tracks and where each mix happens: the same tracks
+/// re-cut are another render, and must not overwrite this one.
+fn set_file_name(paths: &[&Path], transitions: &[Transition], settings: &Settings) -> String {
+    let mut parts: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+    parts.extend(transitions.iter().map(|t| format!("{} {}", t.out, t.into)));
+    parts.push(format!("{} {}", settings.keylock, settings.bass_swap));
+    file_name(&parts.iter().map(String::as_str).collect::<Vec<_>>())
+}
+
 /// One transition rendered, `LEAD` seconds either side.
 pub fn render_transition(playing: &Track, next: &Track, transition: &Transition, settings: &Settings) -> Result<Clip> {
     let a = stelly_mix::decode::decode_file_stereo(&audio(playing)?)?;
@@ -203,9 +212,8 @@ pub fn render_set(loaded: &Loaded, plan: &Plan) -> Result<Clip> {
     })?;
     let dir = renders();
     std::fs::create_dir_all(&dir).with_context(|| format!("creating {}", dir.display()))?;
-    let names: Vec<String> = chain.iter().map(|t| t.path.to_string_lossy().into_owned()).collect();
-    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
-    let path = dir.join(file_name(&refs));
+    let paths: Vec<&Path> = chain.iter().map(|t| t.path.as_path()).collect();
+    let path = dir.join(set_file_name(&paths, &plan.transitions, &Settings::default()));
     render::write_wav(&path, &rendered.audio)?;
     let marks = rendered
         .cues
@@ -503,6 +511,19 @@ pub fn clock(seconds: f64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_set_re_cut_is_rendered_to_a_file_of_its_own() {
+        let mix = |out, into| Transition { to: 1, out, into, score: 0.5, sound: 0.5, ratio: 1.0, key_steps: None, energy: None };
+        let paths = [Path::new("/a.mp3"), Path::new("/b.mp3")];
+        let settings = Settings::default();
+        let name = set_file_name(&paths, &[mix(4, 1)], &settings);
+        assert_eq!(name, set_file_name(&paths, &[mix(4, 1)], &settings));
+        assert_ne!(name, set_file_name(&paths, &[mix(5, 1)], &settings));
+        assert_ne!(name, set_file_name(&paths, &[mix(4, 2)], &settings));
+        let other = Settings { keylock: !settings.keylock, ..settings.clone() };
+        assert_ne!(name, set_file_name(&paths, &[mix(4, 1)], &other));
+    }
 
     #[test]
     fn peaks_are_each_stretch_loudest_and_scaled_to_one() {
