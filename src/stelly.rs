@@ -258,7 +258,23 @@ impl Stelly {
         std::fs::create_dir_all(cache).with_context(|| format!("creating {}", cache.display()))?;
         let url: Value = self.get(&format!("/api/tracks/{}/url", item.id), &[("quality", quality.as_str().to_string())])?;
         let url = url["url"].as_str().context("Stelly's server gave no URL")?;
-        let mut response = ureq::get(url).call().with_context(|| format!("downloading {}", item.title))?;
+        // Bounded, so a transfer that stalls fails rather than holding up
+        // the analysis or the render that wanted it for good: the answer
+        // must start in half a minute, and the file come in twenty, which is
+        // a hi-res album track on a slow line.
+        let mut response = self
+            .agent
+            .get(url)
+            .config()
+            .timeout_recv_response(Some(Duration::from_secs(30)))
+            .timeout_recv_body(Some(Duration::from_secs(20 * 60)))
+            .build()
+            .call()
+            .with_context(|| format!("downloading {}", item.title))?;
+        // This agent hands back errors as answers; one is not audio.
+        if !response.status().is_success() {
+            bail!("downloading {}: the file's host answered {}", item.title, response.status());
+        }
         // What came, which is not always what was asked for.
         let mime = response.headers().get("content-type").and_then(|v| v.to_str().ok()).unwrap_or_default().to_ascii_lowercase();
         let extension = match () {
@@ -454,6 +470,42 @@ pub fn sources() -> Vec<Box<dyn Source>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader};
+    use std::net::TcpListener;
+
+    /// A server that answers each of `replies` in turn, one connection each,
+    /// whatever was asked; `{base}` in a reply is its own address.
+    fn serve(replies: Vec<(u16, &'static str)>) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let own = base.clone();
+        std::thread::spawn(move || {
+            for (status, body) in replies {
+                let Ok((stream, _)) = listener.accept() else { return };
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut line = String::new();
+                while reader.read_line(&mut line).is_ok_and(|n| n > 2) {
+                    line.clear();
+                }
+                let body = body.replace("{base}", &own);
+                let mut stream = stream;
+                let _ = write!(stream, "HTTP/1.1 {status} X\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+            }
+        });
+        base
+    }
+
+    #[test]
+    fn a_file_host_s_error_is_no_audio() {
+        let base = serve(vec![(200, r#"{"url": "{base}/file"}"#), (404, "gone")]);
+        let cache = std::env::temp_dir().join(format!("stelly-mix-download-{}", std::process::id()));
+        let item = Item { id: "7".into(), artist: "A".into(), title: "T".into(), seconds: None };
+        let error = Stelly::new(&base, "token").download(&item, &cache, Quality::Lossy).unwrap_err();
+        assert!(format!("{error:#}").contains("404"), "{error:#}");
+        let left: Vec<_> = std::fs::read_dir(&cache).map(|d| d.flatten().collect()).unwrap_or_default();
+        assert!(left.is_empty(), "nothing kept as audio: {left:?}");
+        let _ = std::fs::remove_dir_all(&cache);
+    }
 
     #[test]
     fn what_is_saved_is_what_a_later_run_reads() {

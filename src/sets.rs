@@ -303,7 +303,8 @@ impl Set {
         let resolved = self.resolved(library);
         let before = at.checked_sub(1).and_then(|k| resolved.get(k).copied().flatten());
         let after = resolved.get(at + 1).copied().flatten();
-        self.between(before, after, library, max_stretch, sound, limit)
+        let replacing = resolved.get(at).copied().flatten();
+        self.between(before, after, replacing, library, max_stretch, sound, limit)
     }
 
     /// What would go *between* the track at `at` and the one before it,
@@ -313,7 +314,7 @@ impl Set {
         let resolved = self.resolved(library);
         let before = at.checked_sub(1).and_then(|k| resolved.get(k).copied().flatten());
         let after = resolved.get(at).copied().flatten();
-        self.between(before, after, library, max_stretch, sound, limit)
+        self.between(before, after, None, library, max_stretch, sound, limit)
     }
 
     fn resolved(&self, library: &[Track]) -> Vec<Option<usize>> {
@@ -321,10 +322,14 @@ impl Set {
     }
 
     /// Tracks that mix well out of `before` and into `after`, best first.
+    /// `replacing` is the track a swap would take out: another edit of its
+    /// song is a fair choice for its slot, of any other song in the set not.
+    #[allow(clippy::too_many_arguments)]
     fn between(
         &self,
         before: Option<usize>,
         after: Option<usize>,
+        replacing: Option<usize>,
         library: &[Track],
         max_stretch: f64,
         sound: SoundScale,
@@ -339,7 +344,11 @@ impl Set {
         // Everything the set already holds: offering one it is already
         // playing is a menu item that makes the set worse.
         let held: Vec<usize> = self.resolved(library).into_iter().flatten().collect();
-        let free = |i: usize| !held.contains(&i);
+        let free = |i: usize| {
+            !held.contains(&i)
+                && crate::set::steady(&library[i])
+                && !held.iter().filter(|&&h| Some(h) != replacing).any(|&h| crate::transitions::same_song(&library[h], &library[i]))
+        };
 
         // Out of the track before, or — for the first slot — into the one
         // after, which is the only mix that slot has.
@@ -692,6 +701,24 @@ mod tests {
         set.replace(1, "stelly:4", &library, 0.06, SoundScale::of(&library)).unwrap();
         assert_eq!(set.tracks, vec!["stelly:1", "stelly:4", "stelly:3"]);
         assert_eq!(set.steps.len(), 2);
+    }
+
+    #[test]
+    fn a_swap_offers_the_slot_s_own_other_edit_but_no_other_song_twice() {
+        let edit = |of: &str, id: &str| {
+            let mut t = track(id);
+            t.origin.as_mut().unwrap().item.title = format!("Track {of} (Radio Edit)");
+            t
+        };
+        let mut library = mixable();
+        // 6 is another edit of track 1, elsewhere in the set; 7 of track 2,
+        // the one in the slot.
+        library.push(edit("1", "6"));
+        library.push(edit("2", "7"));
+        let set = cut(&[0, 1, 2], &library);
+        let offered: Vec<String> = set.alternatives(1, &library, 0.06, SoundScale::of(&library), 10).into_iter().map(|f| f.key).collect();
+        assert!(!offered.contains(&"stelly:6".to_string()), "a song the set already plays: {offered:?}");
+        assert!(offered.contains(&"stelly:7".to_string()), "the slot's own song in another edit is a fair swap: {offered:?}");
     }
 
     #[test]
