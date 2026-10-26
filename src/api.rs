@@ -66,6 +66,11 @@ pub struct Way {
     /// The segment mixed into, in the next track, and its seconds.
     pub into: usize,
     pub into_at: (f64, f64),
+    /// See `Transition`. Absent from a server from before drops.
+    #[serde(default)]
+    pub drop_lands: Option<f64>,
+    #[serde(default)]
+    pub cuts_drop: bool,
 }
 
 impl Way {
@@ -83,6 +88,8 @@ impl Way {
             out_at: (out.start, out.end),
             into: transition.into,
             into_at: (into.start, into.end),
+            drop_lands: transition.drop_lands,
+            cuts_drop: transition.cuts_drop,
         }
     }
 
@@ -97,6 +104,8 @@ impl Way {
             ratio: self.ratio,
             key_steps: self.key_steps,
             energy: self.energy,
+            drop_lands: self.drop_lands,
+            cuts_drop: self.cuts_drop,
         }
     }
 }

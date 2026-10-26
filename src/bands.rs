@@ -14,38 +14,11 @@ pub const DIMS: usize = BANDS + 12;
 /// One row per beat interval, `beats.len() - 1` of them, each column z-scored
 /// over the track so that no band drowns the others by being louder.
 pub fn per_beat(audio: &[f32], rate: u32, beats: &[f64]) -> Vec<[f64; DIMS]> {
-    if beats.len() < 2 || audio.len() < N_FFT {
-        return Vec::new();
-    }
-    let frames = spectrogram(audio, rate);
-    let centre = |f: usize| (f * HOP + N_FFT / 2) as f64 / rate as f64;
+    zscored(raw_per_beat(audio, rate, beats))
+}
 
-    let mut rows: Vec<[f64; DIMS]> = beats
-        .windows(2)
-        .map(|w| {
-            let (from, to) = (w[0], w[1]);
-            let first = ((from * rate as f64 - (N_FFT / 2) as f64) / HOP as f64).ceil().max(0.0) as usize;
-            let inside: Vec<&[f64; DIMS]> = (first..frames.len())
-                .take_while(|&f| centre(f) < to)
-                .filter(|&f| centre(f) >= from)
-                .map(|f| &frames[f])
-                .collect();
-            let mut row = [0f64; DIMS];
-            if inside.is_empty() {
-                if let Some(nearest) = frames.get(first.min(frames.len() - 1)) {
-                    row = *nearest;
-                }
-            } else {
-                for frame in &inside {
-                    for (r, v) in row.iter_mut().zip(frame.iter()) {
-                        *r += v / inside.len() as f64;
-                    }
-                }
-            }
-            row
-        })
-        .collect();
-
+/// Each column of `raw_per_beat`'s rows z-scored over the track.
+pub fn zscored(mut rows: Vec<[f64; DIMS]>) -> Vec<[f64; DIMS]> {
     for column in 0..DIMS {
         let n = rows.len() as f64;
         let mean = rows.iter().map(|r| r[column]).sum::<f64>() / n;
@@ -55,6 +28,71 @@ pub fn per_beat(audio: &[f32], rate: u32, beats: &[f64]) -> Vec<[f64; DIMS]> {
         }
     }
     rows
+}
+
+/// The same rows as they were measured: the bands' natural-log energies,
+/// where a difference of one is 4.3dB.
+pub fn raw_per_beat(audio: &[f32], rate: u32, beats: &[f64]) -> Vec<[f64; DIMS]> {
+    Frames::of(audio, rate).per_beat(beats)
+}
+
+/// A track's STFT frames, 23ms apart at 44.1kHz, for whatever wants them
+/// finer than a beat as well as by the beat.
+pub struct Frames {
+    pub rows: Vec<[f64; DIMS]>,
+    rate: u32,
+}
+
+impl Frames {
+    pub fn of(audio: &[f32], rate: u32) -> Self {
+        let rows = if audio.len() < N_FFT { Vec::new() } else { spectrogram(audio, rate) };
+        Self { rows, rate }
+    }
+
+    /// Seconds at the middle of frame `f`.
+    pub fn centre(&self, f: usize) -> f64 {
+        (f * HOP + N_FFT / 2) as f64 / self.rate as f64
+    }
+
+    /// Seconds from one frame to the next.
+    pub fn hop(&self) -> f64 {
+        HOP as f64 / self.rate as f64
+    }
+
+    /// One row per beat interval, `beats.len() - 1` of them, each the mean
+    /// of the frames centred in it.
+    pub fn per_beat(&self, beats: &[f64]) -> Vec<[f64; DIMS]> {
+        let frames = &self.rows;
+        if beats.len() < 2 || frames.is_empty() {
+            return Vec::new();
+        }
+        let rate = self.rate as f64;
+        beats
+            .windows(2)
+            .map(|w| {
+                let (from, to) = (w[0], w[1]);
+                let first = ((from * rate - (N_FFT / 2) as f64) / HOP as f64).ceil().max(0.0) as usize;
+                let inside: Vec<&[f64; DIMS]> = (first..frames.len())
+                    .take_while(|&f| self.centre(f) < to)
+                    .filter(|&f| self.centre(f) >= from)
+                    .map(|f| &frames[f])
+                    .collect();
+                let mut row = [0f64; DIMS];
+                if inside.is_empty() {
+                    if let Some(nearest) = frames.get(first.min(frames.len() - 1)) {
+                        row = *nearest;
+                    }
+                } else {
+                    for frame in &inside {
+                        for (r, v) in row.iter_mut().zip(frame.iter()) {
+                            *r += v / inside.len() as f64;
+                        }
+                    }
+                }
+                row
+            })
+            .collect()
+    }
 }
 
 /// Log band energies then a normalised chroma, per STFT frame.

@@ -57,12 +57,17 @@ pub struct Step {
     pub ratio: f64,
     pub key_steps: Option<u32>,
     pub energy: Option<f64>,
+    /// Absent from a set kept before drops were weighed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drop_lands: Option<f64>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub cuts_drop: bool,
 }
 
 impl Step {
     fn of(transition: &Transition) -> Self {
-        let Transition { out, into, score, sound, ratio, key_steps, energy, .. } = *transition;
-        Self { out, into, score, sound, ratio, key_steps, energy }
+        let Transition { out, into, score, sound, ratio, key_steps, energy, drop_lands, cuts_drop, .. } = *transition;
+        Self { out, into, score, sound, ratio, key_steps, energy, drop_lands, cuts_drop }
     }
 
     /// Back as the planner and the renderer take it, the next track at `to`.
@@ -76,6 +81,8 @@ impl Step {
             ratio: self.ratio,
             key_steps: self.key_steps,
             energy: self.energy,
+            drop_lands: self.drop_lands,
+            cuts_drop: self.cuts_drop,
         }
     }
 }
@@ -588,7 +595,7 @@ mod tests {
     fn plan(tracks: Vec<usize>) -> Plan {
         let transitions = tracks
             .windows(2)
-            .map(|pair| Transition { to: pair[1], out: 1, into: 0, score: 0.5, sound: 0.9, ratio: 1.0, key_steps: Some(0), energy: Some(0.0) })
+            .map(|pair| Transition { to: pair[1], out: 1, into: 0, score: 0.5, sound: 0.9, ratio: 1.0, key_steps: Some(0), energy: Some(0.0), drop_lands: None, cuts_drop: false })
             .collect();
         Plan { tracks, transitions, seconds: 600.0, score: 1.0 }
     }

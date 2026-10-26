@@ -113,6 +113,26 @@ fn peaks_of(samples: &[f32], buckets: usize) -> Vec<f32> {
     peaks.into_iter().map(|p| p / top).collect()
 }
 
+/// The drops of a track analysed before they were looked for, or by an
+/// older build, from its audio at `file`, kept in its library entry for the
+/// next time.
+pub fn drops(track: &Track, file: &Path) -> Result<Vec<f64>> {
+    let pcm = stelly_mix::decode::decode_file(file)?;
+    let drops = stelly_mix::drops::of(&pcm, &track.analysis);
+    // Into the entry as it is on disk now, not as it was loaded: something
+    // else, listening for voices say, may have written it since.
+    let library = library()?;
+    let stored = match &track.origin {
+        Some(origin) => library.by_origin(&origin.key()),
+        None => library.get(&track.path),
+    };
+    if let Some(mut stored) = stored {
+        stored.analysis.drops = Some(drops.clone());
+        library.put(&stored)?;
+    }
+    Ok(drops.at)
+}
+
 /// A track's audio, fetched again from its source if its file has gone.
 pub fn audio(track: &Track) -> Result<PathBuf> {
     sources().audio(track)

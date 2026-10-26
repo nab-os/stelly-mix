@@ -9,6 +9,7 @@ pub mod api;
 pub mod bands;
 pub mod beats;
 pub mod cli;
+pub mod drops;
 pub mod eval;
 pub mod export;
 pub mod grid;
@@ -59,6 +60,11 @@ pub struct Analysis {
     pub phrases: Vec<f64>,
     /// Where the music changes enough to call it a new section, seconds.
     pub sections: Vec<f64>,
+    /// Where the low end comes back after a breakdown or a build, seconds.
+    /// Absent on an entry analysed before they were looked for, and to be
+    /// found again when not `current`; see `drops::of`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drops: Option<drops::Drops>,
 }
 
 #[derive(Debug, Clone)]
@@ -94,8 +100,10 @@ pub fn analyse(pcm: &Pcm, options: &Options) -> Result<Analysis> {
         _ => beats,
     };
 
-    let features = bands::per_beat(&pcm.samples, pcm.rate, &beats);
-    let structure = structure::analyse(&features);
+    let frames = bands::Frames::of(&pcm.samples, pcm.rate);
+    let measured = frames.per_beat(&beats);
+    let structure = structure::analyse(&bands::zscored(measured.clone()));
+    let drops = drops::at(&frames, &beats, structure.downbeat);
 
     let downbeats: Vec<f64> = beats
         .iter()
@@ -130,6 +138,7 @@ pub fn analyse(pcm: &Pcm, options: &Options) -> Result<Analysis> {
         downbeat_confidence: structure.downbeat_confidence,
         phrases,
         sections,
+        drops: Some(drops::Drops::new(drops)),
     })
 }
 

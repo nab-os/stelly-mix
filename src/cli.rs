@@ -593,11 +593,12 @@ fn set(args: &Set, sources: &Sources) -> Result<()> {
         if let Some(t) = plan.transitions.get(k) {
             let (out, into) = (&track.segments[t.out], &chain[k + 1].segments[t.into]);
             println!(
-                "      ↳ out at {} into {}, score {:.2}, sound {:.2}",
+                "      ↳ out at {} into {}, score {:.2}, sound {:.2}{}",
                 clock(out.start),
                 clock(into.start),
                 t.score,
-                t.sound
+                t.sound,
+                crate::transitions::drops_note(t.drop_lands, t.cuts_drop).map_or(String::new(), |n| format!(", {n}")),
             );
         }
     }
@@ -686,7 +687,7 @@ fn next(args: &Next, sources: &Sources) -> Result<()> {
         println!();
         println!("{:.2}  {}", t.score, next.name());
         println!(
-            "      out at {} → in at {}, {:+.1}% tempo, {} → {}{}, sound {:.2}{}",
+            "      out at {} → in at {}, {:+.1}% tempo, {} → {}{}, sound {:.2}{}{}",
             clock(out.start),
             clock(into.start),
             (t.ratio - 1.0) * 100.0,
@@ -695,6 +696,7 @@ fn next(args: &Next, sources: &Sources) -> Result<()> {
             t.key_steps.map_or(String::new(), |s| format!(" ({s} step{})", if s == 1 { "" } else { "s" })),
             t.sound,
             t.energy.map_or(String::new(), |e| format!(", {e:+.1} LU")),
+            crate::transitions::drops_note(t.drop_lands, t.cuts_drop).map_or(String::new(), |n| format!(", {n}")),
         );
     }
     Ok(())
@@ -852,6 +854,10 @@ fn analyse(file: &Path, json: bool, options: &crate::Options) -> Result<()> {
     if !analysis.sections.is_empty() {
         let sections: Vec<String> = analysis.sections.iter().map(|&s| clock(s)).collect();
         println!("  sections at {}", sections.join(", "));
+    }
+    if let Some(drops) = analysis.drops.as_ref().filter(|d| !d.at.is_empty()) {
+        let drops: Vec<String> = drops.at.iter().map(|&s| clock(s)).collect();
+        println!("  drops at {}", drops.join(", "));
     }
     println!(
         "  {} long, analysed in {:.1}s",

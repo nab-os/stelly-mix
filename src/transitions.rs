@@ -14,10 +14,18 @@
 //!   octaves folded away; past `max_stretch` it is not a candidate at all.
 //! - **Key**: steps on the Camelot wheel between the two tracks.
 //! - **Energy**: loudness of the incoming phrase against the outgoing one.
+//! - **Drops**: where they fall against the mix, for tracks whose drops are
+//!   known. The transition runs over one phrase of the outgoing track, the
+//!   incoming bass held back until the swap in the middle. The incoming
+//!   track's drop landing from the swap to just after the mix is the move
+//!   a DJ makes, mixing in over its build; a drop of either inside the rest
+//!   is lost, the incoming one under its held-back bass, the outgoing one
+//!   faded out from under itself.
 //!
 //! The weights are a first guess, to be tuned by ear.
 
 use crate::library::Track;
+use crate::segments::Segment;
 use serde::Serialize;
 
 const SOUND: f64 = 0.55;
@@ -35,6 +43,10 @@ const CLASH: f64 = 0.25;
 /// A voice on one side of a mix is how a great many of them are made, so
 /// mixing away from a singer mid-phrase is worth only a little against it.
 const INTERRUPTS: f64 = 0.08;
+/// The incoming track dropping as the mix hands over to it.
+const DROP_LANDS: f64 = 0.1;
+/// A drop lost inside the mix: more than a key step, less than two voices.
+const DROP_CUT: f64 = 0.15;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -211,6 +223,61 @@ pub struct Transition {
     pub key_steps: Option<u32>,
     /// Incoming loudness minus outgoing, LU.
     pub energy: Option<f64>,
+    /// Seconds of the incoming track's own after the mix starts where its
+    /// drop lands, when it lands as the mix hands over to it.
+    pub drop_lands: Option<f64>,
+    /// Whether a drop of either track falls inside the mix and is lost.
+    pub cuts_drop: bool,
+}
+
+impl Transition {
+    /// What the drops add to a transition's score, or take from it.
+    fn drop_score(&self) -> f64 {
+        DROP_LANDS * self.drop_lands.map_or(0.0, |_| 1.0) - DROP_CUT * if self.cuts_drop { 1.0 } else { 0.0 }
+    }
+}
+
+/// What a transition does with the drops, in a few words, if anything:
+/// for a line that lists it.
+pub fn drops_note(drop_lands: Option<f64>, cuts_drop: bool) -> Option<String> {
+    match (drop_lands, cuts_drop) {
+        (_, true) => Some("mixes over a drop".into()),
+        (Some(at), false) => Some(format!("drops {at:.0}s in")),
+        (None, false) => None,
+    }
+}
+
+/// A track's drops, if they are known and were found the way this build
+/// finds them; none otherwise, which is nothing known, not no drops.
+fn drops(track: &Track) -> &[f64] {
+    track.analysis.drops.as_ref().filter(|d| d.current()).map_or(&[], |d| &d.at)
+}
+
+/// How a mix out of `out` in `playing` into `into` in `next`, `ratio` the
+/// incoming tempo over the one it plays at, sits with their drops: where the
+/// incoming one lands, in its own seconds from the mix's start, when it
+/// lands from the swap to a bar after the mix; and whether a drop of either
+/// falls in the rest of it. A beat's grace either side: a drop is placed by
+/// the audio, and can sit a little before the bar line it belongs to.
+fn drop_fit(playing: &Track, out: &Segment, next: &Track, into: &Segment, ratio: f64) -> (Option<f64>, bool) {
+    let length = out.end - out.start;
+    let beat = |track: &Track| track.bpm().map_or(0.5, |bpm| 60.0 / bpm);
+    let outgoing_cut = drops(playing).iter().any(|&d| (out.start - beat(playing)..out.end - beat(playing)).contains(&d));
+
+    // The incoming track's own seconds run at the tempo it plays at over its own.
+    let (length_in, beat_in) = (length / ratio, beat(next));
+    let swap = length_in / 2.0 - beat_in;
+    let mut lands = None;
+    let mut incoming_cut = false;
+    for &d in drops(next) {
+        let from_start = d - into.start;
+        if (-beat_in..swap).contains(&from_start) {
+            incoming_cut = true;
+        } else if (swap..=length_in + 4.0 * beat_in).contains(&from_start) {
+            lands = lands.or(Some(from_start));
+        }
+    }
+    (lands, outgoing_cut || incoming_cut)
 }
 
 /// The best transition into each of `others`, best first. The playing track
@@ -265,6 +332,7 @@ pub fn from_allowed(
                     let sound = cosine(&a.embedding, &b.embedding);
                     let energy = a.loudness.zip(b.loudness).map(|(a, b)| b - a);
                     let energy_score = energy.map_or(0.5, |e| 1.0 - (e.abs() / ENERGY_RANGE).min(1.0));
+                    let (drop_lands, cuts_drop) = drop_fit(playing, a, next, b, ratio);
                     let transition = Transition {
                         to,
                         out,
@@ -274,10 +342,18 @@ pub fn from_allowed(
                         ratio,
                         key_steps,
                         energy,
+                        drop_lands,
+                        cuts_drop,
                     };
                     (transition, fixed, energy_score)
                 })
-                .max_by(|a, b| (a.0.sound + 0.01 * a.2).total_cmp(&(b.0.sound + 0.01 * b.2)))
+                // The pair that sounds most alike, unless the drops are
+                // worth more than the sound it gives up: weighed as the
+                // score will weigh them, raw sound breaking ties.
+                .max_by(|a, b| {
+                    let weighed = |t: &(Transition, f64, f64)| SOUND * options.sound.score(t.0.sound) + t.0.drop_score();
+                    weighed(a).total_cmp(&weighed(b)).then((a.0.sound + 0.01 * a.2).total_cmp(&(b.0.sound + 0.01 * b.2)))
+                })
         }
     };
     // Over every core for a large library, in order either way.
@@ -314,7 +390,8 @@ pub fn from_allowed(
         let interrupts = out_voice.max(into_voice);
         transition.score = SOUND * options.sound.score(transition.sound) + *fixed + ENERGY * *energy_score
             - CLASH * clash
-            - INTERRUPTS * interrupts;
+            - INTERRUPTS * interrupts
+            + transition.drop_score();
     }
     let mut best: Vec<Transition> = best.into_iter().map(|b| b.0).collect();
     best.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -438,6 +515,7 @@ pub(crate) mod tests {
                 downbeat_confidence: 1.0,
                 phrases: Vec::new(),
                 sections: Vec::new(),
+                drops: None,
             },
             segments,
         }
@@ -467,6 +545,47 @@ pub(crate) mod tests {
             (neither - both) > (neither - one) * 2.0,
             "the clash is the heavy part, not the interruption"
         );
+    }
+
+    fn dropping_at(mut track: Track, at: &[f64]) -> Track {
+        track.analysis.drops = Some(crate::drops::Drops::new(at.to_vec()));
+        track
+    }
+
+    #[test]
+    fn the_incoming_drop_lands_as_the_mix_hands_over() {
+        let options = Options { sound: SoundScale { mean: 0.9, spread: 0.05 }, ..Default::default() };
+        let playing = track("a", &[1, 1, 7, 7, 7, 7], false);
+        let plain = track("b", &[7, 7, 7, 7, 7, 7], false);
+        // Phrases 16s from 8s: a drop at 40s ends phrase 1 and starts phrase 2.
+        let dropping = dropping_at(plain.clone(), &[40.0]);
+        let without = &from(&playing, std::slice::from_ref(&plain), &options)[0];
+        let with = &from(&playing, std::slice::from_ref(&dropping), &options)[0];
+        assert_eq!(with.into, 1, "in over the build, the drop at the hand-over");
+        assert_eq!(with.drop_lands, Some(16.0));
+        assert!(!with.cuts_drop);
+        assert!(with.score > without.score, "{} vs {}", with.score, without.score);
+    }
+
+    #[test]
+    fn a_drop_inside_the_mix_is_not_mixed_over() {
+        let options = Options { sound: SoundScale { mean: 0.9, spread: 0.05 }, ..Default::default() };
+        let next = track("b", &[7, 7, 7, 7, 7, 7], false);
+        // The playing track's last phrases sound the same; its last one
+        // drops halfway through.
+        let playing = track("a", &[1, 1, 1, 7, 7, 7], false);
+        let plain = &from(&playing, std::slice::from_ref(&next), &options)[0];
+        assert_eq!(plain.out, 5, "alike, the last of equals");
+        let dropping = dropping_at(playing.clone(), &[96.0]);
+        let best = &from(&dropping, std::slice::from_ref(&next), &options)[0];
+        assert_ne!(best.out, 5, "not out of the phrase the drop is in");
+        assert!(!best.cuts_drop);
+
+        // An incoming drop in the mix's first half, under its held-back bass,
+        // is lost too: from every way in it costs.
+        let early: Vec<f64> = next.segments.iter().map(|s| s.start + 4.0).collect();
+        let swallowed = from(&playing, &[dropping_at(next.clone(), &early)], &options);
+        assert!(swallowed[0].cuts_drop && swallowed[0].score < plain.score - 0.1);
     }
 
     #[test]

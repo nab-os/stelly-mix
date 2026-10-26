@@ -1,5 +1,5 @@
 //! A file's waveform, with what the analysis found drawn over it: every bar,
-//! every eight-bar phrase, the sections, and whatever spans the view wants
+//! every eight-bar phrase, the sections, the drops, and whatever spans the view wants
 //! shown. A click plays the file from there; player.js does the playing.
 
 use super::{player, State};
@@ -27,6 +27,8 @@ pub struct WaveProps {
     #[props(default)]
     pub sections: Vec<f64>,
     #[props(default)]
+    pub drops: Vec<f64>,
+    #[props(default)]
     pub spans: Vec<Span>,
     /// Single moments, a bass swap say.
     #[props(default)]
@@ -48,8 +50,8 @@ pub fn Waveform(props: WaveProps) -> Element {
     let seconds = props.seconds.max(0.001);
     let x = |t: f64| t / seconds * PEAKS as f64;
     let lines = |times: &[f64]| times.iter().map(|&t| x(t)).collect::<Vec<f64>>();
-    let (downbeats, phrases, sections, marks) =
-        (lines(&props.downbeats), lines(&props.phrases), lines(&props.sections), lines(&props.marks));
+    let (downbeats, phrases, sections, drops, marks) =
+        (lines(&props.downbeats), lines(&props.phrases), lines(&props.sections), lines(&props.drops), lines(&props.marks));
     let spans: Vec<(f64, f64, String)> =
         props.spans.iter().map(|s| (x(s.from), (x(s.to) - x(s.from)).max(1.0), format!("span {}", s.kind))).collect();
 
@@ -81,6 +83,9 @@ pub fn Waveform(props: WaveProps) -> Element {
                 }
                 for at in sections {
                     line { class: "section", x1: "{at}", x2: "{at}", y1: "0", y2: "100" }
+                }
+                for at in drops {
+                    line { class: "drop", x1: "{at}", x2: "{at}", y1: "0", y2: "100" }
                 }
                 for at in marks {
                     line { class: "mark", x1: "{at}", x2: "{at}", y1: "0", y2: "100" }
@@ -115,6 +120,7 @@ pub fn Legend() -> Element {
             span { i { style: "background: #ffffff40" } "bars" }
             span { i { style: "background: var(--accent)" } "8-bar phrases" }
             span { i { style: "background: var(--warm)" } "sections" }
+            span { i { style: "background: var(--danger)" } "drops" }
             span { i { style: "background: var(--good)" } "transition" }
         }
     }

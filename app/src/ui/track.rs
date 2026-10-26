@@ -6,7 +6,7 @@ use super::{player, score_class, Lib, State};
 use crate::work::{self, clock, Clip};
 use dioxus::prelude::*;
 use stelly_mix::render::Settings;
-use stelly_mix::transitions::Transition;
+use stelly_mix::transitions::{self, Transition};
 
 /// Ways on listed.
 const LISTED: usize = 30;
@@ -55,6 +55,27 @@ fn TrackPanel(lib: Lib, index: usize) -> Element {
         move || {
             let lib = lib.clone();
             async move { work::blocking(move || work::audio(&lib.0.tracks[index])).await }
+        }
+    });
+
+    // Kept with the analysis; an entry from before drops were looked for, or
+    // with drops an older build found, has them worked out from its audio
+    // once that is here, and kept from then.
+    let drops = use_resource({
+        let lib = lib.clone();
+        move || {
+            let track = lib.0.tracks[index].clone();
+            let file = match &*audio.read() {
+                Some(Ok(file)) => Some(file.clone()),
+                _ => None,
+            };
+            async move {
+                if let Some(drops) = track.analysis.drops.clone().filter(|d| d.current()) {
+                    return Some(drops.at);
+                }
+                let file = file?;
+                work::blocking(move || work::drops(&track, &file)).await.map_err(|err| eprintln!("drops: {err:#}")).ok()
+            }
         }
     });
 
@@ -160,6 +181,9 @@ fn TrackPanel(lib: Lib, index: usize) -> Element {
                 }
                 span { class: "fact", "{clock(analysis.seconds)}" }
                 span { class: "fact", "{analysis.phrases.len()} phrases" }
+                if let Some(Some(drops)) = drops() {
+                    span { class: "fact", {if drops.len() == 1 { "1 drop".to_string() } else { format!("{} drops", drops.len()) }} }
+                }
                 span { class: "fact", "downbeat confidence {analysis.downbeat_confidence:.2}" }
             }
             match &*audio.read() {
@@ -172,6 +196,7 @@ fn TrackPanel(lib: Lib, index: usize) -> Element {
                         downbeats: analysis.downbeats.clone(),
                         phrases: analysis.phrases.clone(),
                         sections: analysis.sections.clone(),
+                        drops: drops().flatten().unwrap_or_default(),
                         spans: out_span.into_iter().collect::<Vec<_>>(),
                     }
                     div { class: "row-flex",
@@ -287,6 +312,7 @@ fn Way(
     let key = |t: &stelly_mix::library::Track| t.analysis.key.as_ref().map_or("?".into(), |k| k.camelot.clone());
     let steps = way.key_steps.map_or(String::new(), |s| format!(" ({s} step{})", if s == 1 { "" } else { "s" }));
     let energy = way.energy.map_or(String::new(), |e| format!(" · {e:+.1} LU"));
+    let drops = transitions::drops_note(way.drop_lands, way.cuts_drop).map_or(String::new(), |n| format!(" · {n}"));
     let path = to.path.clone();
     rsx! {
         div {
@@ -296,7 +322,7 @@ fn Way(
             div {
                 div { class: "name ellipsis", "{to.name()}" }
                 div { class: "detail",
-                    "out at {clock(out.start)} → in at {clock(into.start)} · {(way.ratio - 1.0) * 100.0:+.1}% · {key(from)} → {key(to)}{steps} · sound {way.sound:.2}{energy}"
+                    "out at {clock(out.start)} → in at {clock(into.start)} · {(way.ratio - 1.0) * 100.0:+.1}% · {key(from)} → {key(to)}{steps} · sound {way.sound:.2}{energy}{drops}"
                 }
             }
             div { class: "actions",
