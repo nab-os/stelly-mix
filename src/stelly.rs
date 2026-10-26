@@ -103,7 +103,9 @@ impl Stelly {
     }
 
     /// Bring every entry of the server's mix library that this one lacks
-    /// into it, telling `report` how far along it is; how many came.
+    /// into it, and those the server has found drops in that this one has
+    /// none of, or older ones, telling `report` how far along it is; how
+    /// many came.
     pub fn sync(&self, library: &Library, report: &dyn Fn(usize, usize)) -> Result<usize> {
         // Entries of another analysis are read by neither side: mirroring
         // them would store what `by_origin` then drops as stale, and every
@@ -120,8 +122,11 @@ impl Stelly {
         let missing: Vec<i64> = self
             .library()?
             .into_iter()
-            .map(|s| s.id)
-            .filter(|id| library.by_origin(&format!("{SOURCE}:{id}")).is_none())
+            .filter(|summary| match library.by_origin(&format!("{SOURCE}:{}", summary.id)) {
+                None => true,
+                Some(here) => summary.drops == Some(crate::drops::VERSION) && !here.analysis.drops.is_some_and(|d| d.current()),
+            })
+            .map(|summary| summary.id)
             .collect();
         self.bring(library, &missing, report)
     }
@@ -136,6 +141,13 @@ impl Stelly {
             for mut entry in entries {
                 if !adopt(&mut entry) {
                     continue;
+                }
+                // What was heard here stays: the server does not listen for
+                // voices, and a track brought again for its drops has the
+                // same phrases the voices were heard in.
+                if entry.track.vocals.is_none() {
+                    let here = library.by_origin(&format!("{SOURCE}:{}", entry.id));
+                    entry.track.vocals = here.and_then(|here| here.vocals.filter(|_| here.segments.len() == entry.track.segments.len()));
                 }
                 library.put(&entry.track)?;
                 done += 1;

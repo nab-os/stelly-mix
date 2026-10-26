@@ -19,6 +19,10 @@ pub struct TrackSummary {
     pub key: Option<String>,
     pub seconds: f64,
     pub phrases: usize,
+    /// `drops::VERSION` its drops were found by; absent when it has none,
+    /// and from a server from before them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub drops: Option<u32>,
 }
 
 impl TrackSummary {
@@ -36,6 +40,7 @@ impl TrackSummary {
             key: track.analysis.key.as_ref().map(|k| k.camelot.clone()),
             seconds: track.analysis.seconds,
             phrases: track.analysis.phrases.len(),
+            drops: track.analysis.drops.as_ref().map(|d| d.version),
         }
     }
 
