@@ -105,6 +105,26 @@ impl State {
         });
     }
 
+    /// Show Stelly's track `id`, as a link from Stelly asks: right away if
+    /// it is here, else once the server's analysis of it has come, which
+    /// is minutes when the server has to make it first.
+    pub fn open_stelly(self, id: i64) {
+        dioxus::desktop::window().set_focus();
+        let mut busy = self.busy;
+        busy.set(Some(format!("Bringing Stelly's track {id}, analysing it first if the server has not…")));
+        spawn(async move {
+            let found = work::blocking(move || work::stelly_track(id)).await;
+            busy.set(None);
+            match found {
+                Ok(path) => {
+                    self.reload();
+                    self.open(path);
+                }
+                Err(err) => self.fail(err),
+            }
+        });
+    }
+
     pub fn fail(mut self, err: anyhow::Error) {
         self.error.set(Some(format!("{err:#}")));
     }
@@ -123,6 +143,16 @@ pub fn App() -> Element {
     });
     let _bench = sets::Bench::provide();
     use_hook(move || state.sync());
+    use_hook(move || {
+        spawn(async move {
+            let Some(mut links) = crate::link::take() else { return };
+            while let Some(link) = links.recv().await {
+                match link {
+                    crate::link::Link::Track(id) => state.open_stelly(id),
+                }
+            }
+        })
+    });
     player::use_transport(state);
 
     rsx! {

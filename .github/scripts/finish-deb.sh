@@ -70,6 +70,15 @@ for k, v in fields.items():
 open(path, "w").write("\n".join(out) + "\n")
 PY
 
+# The menu entry opens stelly-mix:// links too, Stelly's "Open in
+# stelly-mix", which dx has no setting for on Linux.
+for entry in "$ROOT"/usr/share/applications/*.desktop; do
+  [ -f "$entry" ] || continue
+  grep -q '^MimeType=' "$entry" || echo 'MimeType=x-scheme-handler/stelly-mix;' >> "$entry"
+  sed -i '/^Exec=/{/%[uUfF]/!s/$/ %u/}' "$entry"
+  echo "  links:    $(grep -E '^(Exec|MimeType)=' "$entry" | tr '\n' ' ')"
+done
+
 mkdir -p "$(dirname "$OUT")"
 dpkg-deb --build --root-owner-group "$ROOT" "$OUT" >/dev/null
 echo "  built:    $OUT ($(du -h "$OUT" | cut -f1))"

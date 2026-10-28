@@ -49,7 +49,7 @@ pub fn url(path: &Path) -> String {
 }
 
 /// 128 bits from the standard library's own random keys.
-fn token() -> String {
+pub(crate) fn token() -> String {
     use std::hash::{BuildHasher, Hasher};
     let half = || {
         let mut hasher = std::collections::hash_map::RandomState::new().build_hasher();

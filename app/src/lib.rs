@@ -5,6 +5,7 @@
 //! A library, like stelly-mix's command line, so that a build with more
 //! sources than local files is a `main` calling `run` with them.
 
+pub mod link;
 pub mod server;
 mod ui;
 pub mod work;
@@ -13,6 +14,13 @@ use stelly_mix::source::Source;
 
 /// Open the window, with `sources` besides local files.
 pub fn run(sources: Vec<Box<dyn Source>>) {
+    // A link for a window already open goes to it, and this launch ends.
+    let link = link::from_args();
+    if link.as_ref().is_some_and(link::hand_over) {
+        return;
+    }
+    link::listen(link);
+    std::thread::spawn(link::register);
     work::set_sources(sources);
     if let Err(err) = server::start() {
         eprintln!("could not start serving audio to the window: {err}");
