@@ -27,6 +27,8 @@ use stelly_provider::Quality;
 const CHUNK: usize = 200;
 /// The largest reply read, bytes: a chunk of entries, at worst.
 const REPLY_LIMIT: u64 = 1 << 30;
+/// Times a chunk of entries is asked for before a sync gives up.
+const ATTEMPTS: u32 = 4;
 /// What Stelly's tracks are called here: `stelly:<id>`, by the server's own
 /// ids, whichever of its providers has the audio.
 pub const SOURCE: &str = "stelly";
@@ -139,7 +141,7 @@ impl Stelly {
         let mut done = 0;
         report(0, ids.len());
         for chunk in ids.chunks(CHUNK) {
-            let entries: Vec<Entry> = self.post("/api/mix/tracks", &EntriesRequest { ids: chunk.to_vec() })?;
+            let entries = self.entries(chunk)?;
             for mut entry in entries {
                 if !adopt(&mut entry) {
                     continue;
@@ -157,6 +159,25 @@ impl Stelly {
             report(done, ids.len());
         }
         Ok(done)
+    }
+
+    /// The server's entries for `ids`, asked for again when the connection
+    /// fails or the server is busy: a sync is hundreds of replies of tens of
+    /// megabytes, and one of them torn on the way, a TLS record that will not
+    /// decrypt, a reset, should not end it.
+    fn entries(&self, ids: &[i64]) -> Result<Vec<Entry>> {
+        let request = EntriesRequest { ids: ids.to_vec() };
+        let mut attempt = 1;
+        loop {
+            match self.post("/api/mix/tracks", &request) {
+                Err(err) if attempt < ATTEMPTS && transient(&err) => {
+                    eprintln!("{err:#}, trying again");
+                    std::thread::sleep(Duration::from_secs(2u64.pow(attempt)));
+                    attempt += 1;
+                }
+                result => return result,
+            }
+        }
     }
 
     /// Have the server analyse track `id` for mixing now, ahead of what it
@@ -336,6 +357,13 @@ fn answer<T: DeserializeOwned>(path: &str, mut response: ureq::http::Response<ur
     serde_json::from_str(&body).with_context(|| format!("parsing {path}"))
 }
 
+/// Whether `err` is worth asking again for: the connection failed, or the
+/// server said it was busy; not a refused token or a reply that will not parse.
+fn transient(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| cause.is::<ureq::Error>() || cause.is::<std::io::Error>())
+        || err.to_string().starts_with("Stelly's server could not answer just now")
+}
+
 /// One setting out of a `KEY=value` file, as `from_env` reads them:
 /// `export ` is allowed in front, and quotes around the value come off.
 fn from_file(file: &Path, key: &str) -> Option<String> {
@@ -481,6 +509,15 @@ mod tests {
     use super::*;
     use std::io::{BufRead, BufReader};
     use std::net::TcpListener;
+
+    #[test]
+    fn a_torn_connection_is_asked_again_a_refusal_is_not() {
+        let torn = anyhow::Error::from(ureq::Error::Io(std::io::Error::other("cannot decrypt peer's message")));
+        assert!(transient(&torn.context("reading /api/mix/tracks")));
+        assert!(transient(&anyhow::anyhow!("Stelly's server could not answer just now, try again: busy")));
+        assert!(!transient(&anyhow::anyhow!("Stelly's server refused the token in STELLY_TOKEN")));
+        assert!(!transient(&anyhow::anyhow!("/api/mix/tracks: 400 Bad Request: no")));
+    }
 
     /// A server that answers each of `replies` in turn, one connection each,
     /// whatever was asked; `{base}` in a reply is its own address.
