@@ -3,7 +3,7 @@
 //! library, a track's waveform, where to go next, a transition or a set
 //! rendered to a file, and the library searched by description.
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -77,6 +77,30 @@ pub fn set_server(base: &str, token: &str) -> Result<stelly_mix::api::Status> {
 
 pub fn library() -> Result<Library> {
     Library::open(Library::default_dir())
+}
+
+/// Where Stelly's track `id` is in the library, bringing it here first if
+/// it is not: the server's analysis, which may mean waiting for the server
+/// to make it, or this machine's own when the server has none to give.
+pub fn stelly_track(id: i64) -> Result<PathBuf> {
+    let library = library()?;
+    let key = format!("{}:{id}", stelly_mix::stelly::SOURCE);
+    if let Some(track) = library.by_origin(&key) {
+        return Ok(track.path);
+    }
+    let Some(server) = stelly() else {
+        bail!("Stelly asked for its track {id}, but no Stelly server is set here: add it in Settings");
+    };
+    if let Some(mut track) = server.analyse_now(&id.to_string())? {
+        // Filed under the id it was asked by, as `sync` files what it brings.
+        if let Some(origin) = track.origin.as_mut() {
+            origin.source = stelly_mix::stelly::SOURCE.to_string();
+            origin.item.id = id.to_string();
+            library.put(&track)?;
+            return Ok(track.path);
+        }
+    }
+    Ok(sources().track(&library, &key)?.path)
 }
 
 pub fn load() -> Result<Loaded> {

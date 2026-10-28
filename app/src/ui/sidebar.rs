@@ -182,6 +182,24 @@ pub fn Sidebar() -> Element {
                     p { class: "muted small", "reading the library…" }
                 }
             }
+
+            // What is under way, a sync or a track Stelly asked for, and
+            // what last went wrong, which stays until it is put away.
+            if let Some(busy) = (state.busy)() {
+                div { class: "status",
+                    span { class: "working-dot" }
+                    span { "{busy}" }
+                }
+            }
+            if let Some(message) = (state.load_error)() {
+                div { class: "status error", "The library could not be read: {message}" }
+            }
+            if let Some(message) = (state.error)() {
+                div { class: "status",
+                    span { class: "error spacer selectable", "{message}" }
+                    button { onclick: move |_| { let mut error = state.error; error.set(None) }, "×" }
+                }
+            }
         }
     }
 }
