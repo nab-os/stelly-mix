@@ -27,6 +27,7 @@
 use crate::library::Track;
 use crate::segments::Segment;
 use serde::Serialize;
+use std::borrow::Borrow;
 
 const SOUND: f64 = 0.55;
 const TEMPO: f64 = 0.15;
@@ -115,8 +116,8 @@ impl SoundScale {
     /// through the library, the `SCALE_CLOSEST` best pairs with any other
     /// track, copies of the same recording left out. The same tracks every
     /// time for the same library.
-    pub fn of(tracks: &[Track]) -> Self {
-        let usable: Vec<&Track> = tracks.iter().filter(|t| !t.segments.is_empty()).collect();
+    pub fn of<T: Borrow<Track>>(tracks: &[T]) -> Self {
+        let usable: Vec<&Track> = tracks.iter().map(Borrow::borrow).filter(|t: &&Track| !t.segments.is_empty()).collect();
         let n = usable.len();
         if n < 3 {
             return Self::default();
@@ -233,17 +234,17 @@ fn dot(a: &[f32], b: &[f32]) -> f64 {
 /// `transitions` with one per recording, best first kept: copies are looked
 /// for only among what is about as long, so a long list costs no more than
 /// its length.
-fn one_per_recording(transitions: Vec<Transition>, others: &[Track]) -> Vec<Transition> {
+fn one_per_recording<T: Borrow<Track>>(transitions: Vec<Transition>, others: &[T]) -> Vec<Transition> {
     let mut kept: Vec<Transition> = Vec::with_capacity(transitions.len());
     let mut by_length: std::collections::HashMap<i64, Vec<usize>> = std::collections::HashMap::new();
     for transition in transitions {
-        let track = &others[transition.to];
+        let track = others[transition.to].borrow();
         let second = track.analysis.seconds.round() as i64;
         let reach = SAME_LENGTH.ceil() as i64 + 1;
         let copy = (second - reach..=second + reach)
             .filter_map(|s| by_length.get(&s))
             .flatten()
-            .any(|&k| same_recording(&others[kept[k].to], track));
+            .any(|&k| same_recording(others[kept[k].to].borrow(), track));
         if !copy {
             by_length.entry(second).or_default().push(kept.len());
             kept.push(transition);
@@ -337,15 +338,17 @@ fn drop_fit(playing: &Track, out: &Segment, next: &Track, into: &Segment, ratio:
 
 /// The best transition into each of `others`, best first. The playing track
 /// is mixed out of from its second half, the next one mixed into in its first.
-pub fn from(playing: &Track, others: &[Track], options: &Options) -> Vec<Transition> {
+/// `others` are tracks, or shared handles on them: a server's library holds
+/// the latter, so a few tracks can be added without copying the rest.
+pub fn from<T: Borrow<Track> + Sync>(playing: &Track, others: &[T], options: &Options) -> Vec<Transition> {
     from_allowed(playing, others, options, |_, _| true)
 }
 
 /// As `from`, over only the `others` that `allowed` lets through: a set's
 /// planner leaves out what it has played and what is too far from its tempo.
-pub fn from_allowed(
+pub fn from_allowed<T: Borrow<Track> + Sync>(
     playing: &Track,
-    others: &[Track],
+    others: &[T],
     options: &Options,
     allowed: impl Fn(usize, &Track) -> bool + Sync,
 ) -> Vec<Transition> {
@@ -415,7 +418,7 @@ pub fn from_allowed(
     // Over every core for a large library, in order either way.
     let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
     let mut best: Vec<Transition> = if others.len() < 2000 || threads < 2 {
-        others.iter().enumerate().filter_map(candidate).collect()
+        others.iter().enumerate().filter_map(|(i, t)| candidate((i, t.borrow()))).collect()
     } else {
         let chunk = others.len().div_ceil(threads);
         std::thread::scope(|scope| {
@@ -424,7 +427,7 @@ pub fn from_allowed(
                 .enumerate()
                 .map(|(c, part)| {
                     let candidate = &candidate;
-                    scope.spawn(move || part.iter().enumerate().filter_map(|(i, t)| candidate((c * chunk + i, t))).collect::<Vec<_>>())
+                    scope.spawn(move || part.iter().enumerate().filter_map(|(i, t)| candidate((c * chunk + i, t.borrow()))).collect::<Vec<_>>())
                 })
                 .collect();
             handles.into_iter().flat_map(|h| h.join().expect("a scoring thread panicked")).collect()
