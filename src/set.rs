@@ -10,6 +10,7 @@
 
 use crate::library::Track;
 use crate::transitions::{self, fold, same_recording, same_song, Transition};
+use std::borrow::Borrow;
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -86,8 +87,8 @@ impl Plan {
 
 /// The best set from `library[first]` that reaches `options.seconds`, or the
 /// longest one there is if the library runs out first.
-pub fn plan(library: &[Track], first: usize, options: &Options) -> Option<Plan> {
-    let master = library[first].bpm()?;
+pub fn plan<T: Borrow<Track> + Sync>(library: &[T], first: usize, options: &Options) -> Option<Plan> {
+    let master = library[first].borrow().bpm()?;
     let rate = |track: &Track| track.bpm().map_or(1.0, |bpm| fold(bpm / master));
     let ranking = transitions::Options {
         max_stretch: options.max_stretch,
@@ -106,13 +107,13 @@ pub fn plan(library: &[Track], first: usize, options: &Options) -> Option<Plan> 
         let mut grown = Vec::new();
         for plan in &beam {
             let last = *plan.tracks.last().expect("a plan has a first track");
-            let playing = &library[last];
+            let playing = library[last].borrow();
             // Where the playing track came in, in its own seconds.
             let entered = plan.transitions.last().map_or(0.0, |t| playing.segments[t.into].start);
             let liked = |i: usize| options.like.as_ref().map_or(1.0, |like| like[i]);
             let steps = transitions::from_allowed(playing, library, &ranking, |i, next| {
                 // Nor another edit of a song already in it.
-                let played = plan.tracks.iter().chain(&options.avoid).any(|&p| p == i || same_recording(&library[p], next) || same_song(&library[p], next));
+                let played = plan.tracks.iter().chain(&options.avoid).any(|&p| p == i || same_recording(library[p].borrow(), next) || same_song(library[p].borrow(), next));
                 !played && steady(next) && liked(i) >= LIKE_FLOOR
             });
             let mut extended = false;

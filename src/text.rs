@@ -37,10 +37,11 @@ pub fn scores(encoder: &mut TextEncoder, tracks: &[Track], description: &str) ->
 /// What `scores` makes of a description and the baseline, already embedded
 /// by any text tower of the same model: a server with its own loaded scores
 /// with it rather than loading a second.
-pub fn scores_for(query: &[f32], baseline: &[f32], tracks: &[Track]) -> Vec<f64> {
+pub fn scores_for<T: std::borrow::Borrow<Track>>(query: &[f32], baseline: &[f32], tracks: &[T]) -> Vec<f64> {
     let raw: Vec<f64> = tracks
         .iter()
         .map(|track| {
+            let track = track.borrow();
             let n = track.segments.len().max(1) as f64;
             track
                 .segments

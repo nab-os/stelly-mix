@@ -7,9 +7,13 @@ use crate::library::Track;
 use crate::transitions::{self, SoundScale};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
+use std::sync::Arc;
 
+/// Tracks are held through `Arc`, so `with` shares them with the library it
+/// came from: a server adds what its queue analyses to tens of thousands of
+/// tracks without copying them, or reading them again.
 pub struct Mix {
-    tracks: Vec<Track>,
+    tracks: Vec<Arc<Track>>,
     ids: Vec<i64>,
     by_id: HashMap<i64, usize>,
     scale: SoundScale,
@@ -18,10 +22,30 @@ pub struct Mix {
 impl Mix {
     /// `tracks`, each with its provider's id.
     pub fn new(entries: Vec<(i64, Track)>) -> Self {
-        let (ids, tracks): (Vec<i64>, Vec<Track>) = entries.into_iter().unzip();
+        let (ids, tracks): (Vec<i64>, Vec<Arc<Track>>) = entries.into_iter().map(|(id, track)| (id, Arc::new(track))).unzip();
         let by_id = ids.iter().enumerate().map(|(i, &id)| (id, i)).collect();
         let scale = SoundScale::of(&tracks);
         Self { tracks, ids, by_id, scale }
+    }
+
+    /// This library with `entries` in it, each in place of the one of its id
+    /// when there was one. The scale stays as it was measured: a few tracks
+    /// among thousands do not move it, and measuring it again is the one
+    /// slow part of a library's making.
+    pub fn with(&self, entries: Vec<(i64, Track)>) -> Self {
+        let (mut tracks, mut ids, mut by_id) = (self.tracks.clone(), self.ids.clone(), self.by_id.clone());
+        for (id, track) in entries {
+            let track = Arc::new(track);
+            match by_id.get(&id) {
+                Some(&i) => tracks[i] = track,
+                None => {
+                    by_id.insert(id, tracks.len());
+                    ids.push(id);
+                    tracks.push(track);
+                }
+            }
+        }
+        Self { tracks, ids, by_id, scale: self.scale }
     }
 
     pub fn len(&self) -> usize {
@@ -33,7 +57,7 @@ impl Mix {
     }
 
     pub fn track(&self, id: i64) -> Option<&Track> {
-        self.by_id.get(&id).map(|&i| &self.tracks[i])
+        self.by_id.get(&id).map(|&i| &*self.tracks[i])
     }
 
     fn index(&self, id: i64) -> Result<usize> {
@@ -143,6 +167,20 @@ mod tests {
             assert_eq!(way.to, pair[1]);
         }
         assert!(mix.set(&SetRequest::default(), None).is_err(), "neither a first track nor a description");
+    }
+
+    #[test]
+    fn tracks_added_join_the_library_or_replace_their_own() {
+        let mix = library();
+        let grown = mix.with(vec![(50, track("e", &[1, 1, 2, 2], false)), (30, track("c2", &[1, 1, 1, 1], false))]);
+        assert_eq!(grown.len(), 5);
+        assert_eq!(grown.summaries().iter().map(|s| s.id).collect::<Vec<_>>(), [10, 20, 30, 40, 50]);
+        assert_eq!(grown.track(30).unwrap().path, std::path::PathBuf::from("c2"));
+        assert_eq!(grown.scale, mix.scale, "measured once");
+        // The one it came from is as it was.
+        assert_eq!(mix.len(), 4);
+        assert_eq!(mix.track(30).unwrap().path, std::path::PathBuf::from("c"));
+        assert!(grown.next(10, 6.0, 10).unwrap().iter().any(|w| w.to == 50));
     }
 
     #[test]
